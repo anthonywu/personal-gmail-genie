@@ -2,6 +2,7 @@ import functools
 import itertools
 import os
 import pickle
+from pathlib import Path
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -274,10 +275,16 @@ def main(rule_file_path, query=None, content_preview_length=0):
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
 
-    try:
-        query = sys.argv[2]
-    except IndexError:
-        query = None
-    main(sys.argv[1], query=query, content_preview_length=0)
+    default_rules_file = Path("~/.config/gmail-genie/my_rules.json").expanduser()
+    parser = argparse.ArgumentParser(description="Process Gmail with rules.")
+    parser.add_argument(
+        "--rules",
+        type=Path,
+        default=default_rules_file,
+        help="Path to rules config file",
+    )
+    parser.add_argument("--query", type=str, default=None, help="Optional search query")
+    args = parser.parse_args()
+    main(args.rules, query=args.query, content_preview_length=0)
