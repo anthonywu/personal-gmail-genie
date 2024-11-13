@@ -1,6 +1,7 @@
 import functools
 import itertools
 import os
+import time
 import pickle
 from pathlib import Path
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -208,7 +209,13 @@ def archive_emails(service, message_ids, user_id="me"):
         return False
 
 
-def main(rule_file_path, query=None, content_preview_length=0):
+def main(rule_file_path, interval_seconds=600, **process_kwargs):
+    while True:
+        process(rule_file_path, **process_kwargs)
+        time.sleep(interval_seconds)
+
+
+def process(rule_file_path, query=None, content_preview_length=0):
     mail_rules = MailRuleModel.parse_file(rule_file_path)
     # print(mail_rules)
 
@@ -286,5 +293,13 @@ if __name__ == "__main__":
         help="Path to rules config file",
     )
     parser.add_argument("--query", type=str, default=None, help="Optional search query")
+    parser.add_argument(
+        "--interval-seconds", type=int, default=600, help="interval in seconds"
+    )
     args = parser.parse_args()
-    main(args.rules, query=args.query, content_preview_length=0)
+    main(
+        args.rules,
+        query=args.query,
+        content_preview_length=0,
+        interval_seconds=args.interval_seconds,
+    )
