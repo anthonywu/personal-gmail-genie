@@ -18,6 +18,10 @@ from pydantic import BaseModel
 from typing import Literal
 
 
+CONFIG_DIR = Path("~/.config/gmail-genie").expanduser()
+AUTH_TOKEN_FILE = CONFIG_DIR / "token.pickle"
+LOG_DIR = Path("~/.local/share/gmail_genie").expanduser().mkdir(parents=True, exist_ok=True)
+
 # Define a model with Literal fields
 class ActionModel(BaseModel):
     action: Literal["ARCHIVE", "DELETE", "NO_OP"]
@@ -43,9 +47,9 @@ def authenticate():
     creds = None
     SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-    # Load credentials from token.pickle if it exists
-    if os.path.exists("token.pickle"):
-        with open("token.pickle", "rb") as token:
+    # Load credentials from config dir's token.pickle if it exists
+    if AUTH_TOKEN_FILE.exists():
+        with AUTH_TOKEN_FILE.open("rb") as token:
             creds = pickle.load(token)
 
     # If credentials are invalid or don't exist, get new ones
@@ -57,7 +61,7 @@ def authenticate():
             creds = flow.run_local_server(port=0)
 
         # Save credentials for future use
-        with open("token.pickle", "wb") as token:
+        with AUTH_TOKEN_FILE.open("wb") as token:
             pickle.dump(creds, token)
 
     return build("gmail", "v1", credentials=creds)
@@ -211,6 +215,7 @@ def archive_emails(service, message_ids, user_id="me"):
 
 def main(rule_file_path, interval_seconds=600, **process_kwargs):
     while True:
+        print(time.strftime("%Y-%m-%d %H:%M"))
         process(rule_file_path, **process_kwargs)
         time.sleep(interval_seconds)
 
