@@ -1,56 +1,88 @@
-# personal gmail genie
+# Gmail Genie
 
-the beginnings of a Gmail AI assistant, for everyone's personal use
+A Gmail assistant that automates email management based on user-defined rules.
 
-Goal: give Gmail users personal agency, security, and privacy to add agentic assistants to their email
-
+Goal: Give Gmail users personal agency, security, and privacy to add agentic assistants to their email.
 
 ## Usage
 
-### One time setup
+### One-time Setup
 
-This step is really annoying, you need to get the `credentials.json` file and save it where you plan to run the python script below.
+1. Get your `credentials.json` file and save it in the project directory.
+   - Go to Google Cloud Console and create a project
+   - Enable the Gmail API
+   - Create OAuth 2.0 credentials (Desktop application)
+   - Download the credentials JSON file and save as `credentials.json`
 
-Just go to ChatGPT or Claude and ask for a walkthrough of "Where can I get the Gmail API credentials.json from the Google Cloud Console". This guide does not help with the shit UX that Google put up in front of the Gmail developer experience.
+2. Install dependencies:
+   ```bash
+   brew install uv
+   uv venv && source .venv/bin/activate
+   uv pip install -r requirements.txt
+   ```
 
+3. Create your rules file (see `rules_examples.json` for template)
 
-### Running the script
+### Running the Script
 
-For now, this is not a `pip install`-able package. Just do this:
+Run manually:
+```bash
+python gmail_genie.py [--rules PATH] [--query QUERY] [--interval-seconds SECONDS]
+```
 
-1. `brew install uv`
-2. `uv venv` && `source .venv/bin/activate`
-3. `uv pip install -r requirements.txt`
-4. `python main.py <path to your rules.json> [optional: gmail search query]`  # default to list of your unread emails
+### Launch Agent (macOS)
 
-## progress
+For automatic startup and management:
 
-- list emails by query
-- working demo of basic archive / delete actions
-- mapping label internal id (e.g. `LABEL_11`) <-> humanized label names (e.g. `Finance`)
+```bash
+# Make the launcher script executable
+chmod +x gmail_genie_launcher.sh
 
-## todo
+# Install the Launch Agent (creates plist in ~/Library/LaunchAgents/)
+./gmail_genie_launcher.sh install
 
-- improve the rules schema
-- proper commandline `argparser` setup
-- via "LLM Tool Use", connect to Ollama or Apple-MLX local LLM models for:
-  - summarization
-  - suggested auto-reply
-  - auto-forward to exec assistants
-  - auto-forward to another person (family, co-worker)
-  - auto sort/delete and self-(learn+suggest) new rules over time
-  - etc AI-enabled features
-- GUI for configs
-- Background daemon to run this continuously on your Mac
-  - menu bar daemon?
-  - just do its thing and send you a system notification?
-- History server
-  - store history of agent actions
+# Start the service
+./gmail_genie_launcher.sh start
 
-## questions
+# Other commands
+./gmail_genie_launcher.sh status    # Check if running
+./gmail_genie_launcher.sh logs      # View recent logs
+./gmail_genie_launcher.sh tail      # Follow logs in real-time (Ctrl+C to exit)
+./gmail_genie_launcher.sh stop      # Stop the service
+./gmail_genie_launcher.sh restart   # Restart the service
+./gmail_genie_launcher.sh uninstall # Remove the Launch Agent
+```
 
-- should this run in the Cloud? You'd give up some privacy
+The Launch Agent configuration is stored at: `~/Library/LaunchAgents/com.gmail.genie.plist`
+Logs are stored at: `~/.local/share/gmail_genie/daemon.log`
 
-## related projects
+## Features
 
-- many related attempts on PyPi and GitHub throughout the years, but none/few was built with 2024 LLM capabilities in mind
+- Gmail automation with rules-based filtering
+- Actions: archive, delete, or no-op based on email patterns
+- Interval-based polling for new messages
+- Formatted console output with Rich
+
+## Progress
+
+- ✅ List emails by query
+- ✅ Working demo of basic archive / delete actions
+- ✅ Mapping label internal ID to humanized label names
+- ✅ Background daemon support
+- ✅ macOS Launch Agent support
+
+## Todo
+
+- Improve the rules schema
+- Connect to local LLM models for:
+  - Summarization
+  - Suggested auto-reply
+  - Auto-forward capabilities
+  - Intelligent sorting and rule suggestions
+- GUI for configurations
+- System notifications
+- History server to track agent actions
+
+## Related Projects
+
+Many related attempts on PyPI and GitHub throughout the years, but few were built with 2024 LLM capabilities in mind.
