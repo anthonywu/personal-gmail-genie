@@ -94,8 +94,10 @@ validate_required_vars() {
     CLOUD_RUN_JOB_TASK_TIMEOUT
     RUNTIME_SERVICE_ACCOUNT_ID
     SCHEDULER_SERVICE_ACCOUNT_ID
-    SCHEDULER_JOB_NAME
-    SCHEDULER_CRON
+    SCHEDULER_DAYTIME_JOB_NAME
+    SCHEDULER_DAYTIME_CRON
+    SCHEDULER_OVERNIGHT_JOB_NAME
+    SCHEDULER_OVERNIGHT_CRON
     SCHEDULER_TIME_ZONE
     SCHEDULER_OAUTH_TOKEN_SCOPE
     SECRET_GMAIL_CREDENTIALS_JSON
@@ -211,5 +213,7 @@ job_exists() {
 }
 
 scheduler_job_exists() {
-  gcloud scheduler jobs describe "$SCHEDULER_JOB_NAME" --location="$GCP_SCHEDULER_REGION" >/dev/null 2>&1
+  local job_name="$1"
+
+  gcloud scheduler jobs describe "$job_name" --location="$GCP_SCHEDULER_REGION" >/dev/null 2>&1
 }
