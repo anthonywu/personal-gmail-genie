@@ -75,12 +75,14 @@
   read-only `token.pickle` by refreshing in memory and continuing without
   persisting the refreshed token.
 - Missing rules files are bootstrapped at runtime by `_load_or_init_rules()`,
-  which prompts to create a starter JSON. The README mentions
-  `rules_examples.json`, but that file is not present in this repo.
+  which prompts to create a starter JSON. A tracked example config now lives at
+  `rules.example.json`.
 - The current rule schema is `rule_version`, `from_domain_auto_delete`,
   `from_address_auto_archive`, and `from_address_auto_unsubscribe` (RFC 8058
   one-click POST). If rule behavior changes, update `MailRuleModel`,
   interactive rule building, and starter-file creation together.
+- Rule evaluation order is fixed: delete-by-domain, then archive-by-address,
+  then one-click unsubscribe-by-address, then no-op.
 
 ## Gotchas
 

@@ -40,12 +40,21 @@ class ActionModel(BaseModel):
 
 
 class MailRuleModel(BaseModel):
+    """Persisted rules schema for sender-based mailbox automation."""
+
     rule_version: str
     from_domain_auto_delete: list[str]
     from_address_auto_archive: list[str]
     from_address_auto_unsubscribe: list[str] = []
 
     def process_message(self, message_dict) -> ActionModel:
+        """Return the first matching action for a message.
+
+        Rule precedence is fixed: delete by sender domain, then archive by
+        exact sender address, then one-click unsubscribe by exact sender
+        address. Sender matching is case-insensitive after parsing the
+        normalized address from the `From` header.
+        """
         addr, domain = extract_email_and_domain(message_dict["from"])
         for domain_d in self.from_domain_auto_delete:
             if domain and domain_d.strip().lower() == domain:
@@ -247,7 +256,7 @@ def get_message_details(service, msg_id, user_id="me"):
 
 
 def delete_message(service, msg_id, user_id="me"):
-    """Delete a specific message"""
+    """Move a specific message to Gmail Trash."""
     try:
         service.users().messages().trash(userId=user_id, id=msg_id).execute()
         print(f"Message {msg_id} moved to trash successfully")
@@ -258,14 +267,7 @@ def delete_message(service, msg_id, user_id="me"):
 
 
 def archive_emails(service, message_ids, user_id="me"):
-    """
-    Archive a list of emails by their message IDs.
-
-    Args:
-        service (googleapiclient.discovery.Resource): Gmail API service object.
-        user_id (str): The user's email address or 'me' for the authenticated user.
-        message_ids (list): A list of message IDs to be archived.
-    """
+    """Archive messages by removing Gmail's `INBOX` and `UNREAD` labels."""
     try:
         for msg_id in message_ids:
             service.users().messages().modify(

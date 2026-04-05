@@ -1,0 +1,12 @@
+{
+  "rule_version": "1",
+  "from_domain_auto_delete": [
+    "promo.example"
+  ],
+  "from_address_auto_archive": [
+    "receipts@example.com"
+  ],
+  "from_address_auto_unsubscribe": [
+    "newsletter@example.com"
+  ]
+}
