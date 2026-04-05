@@ -37,10 +37,11 @@ Run manually:
 
 ```bash
 uv run gmail_genie.py run [--rules PATH] [--query QUERY]
-  [--interval-seconds SECONDS] [--once]
+  [--interval-seconds SECONDS] [--dry-run] [--once]
 ```
 
 Use `--once` to process a single pass and exit instead of polling forever.
+Use `--dry-run` to preview archive/delete decisions without changing Gmail.
 
 ### Launch Agent (macOS)
 

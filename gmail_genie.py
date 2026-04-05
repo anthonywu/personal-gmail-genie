@@ -11,6 +11,7 @@
 
 import base64
 import email.mime.text
+import email.utils
 import functools
 import itertools
 import json
@@ -25,6 +26,7 @@ from pydantic import BaseModel
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
 from datetime import datetime, timedelta
 from typing import Literal
@@ -48,11 +50,12 @@ class MailRuleModel(BaseModel):
     from_address_auto_archive: list[str]
 
     def process_message(self, message_dict) -> ActionModel:
+        addr, domain = extract_email_and_domain(message_dict["from"])
         for domain_d in self.from_domain_auto_delete:
-            if domain_d in message_dict["from"]:
+            if domain and domain_d.strip().lower() == domain:
                 return ActionModel(action="DELETE")
         for domain_a in self.from_address_auto_archive:
-            if domain_a in message_dict["from"]:
+            if domain_a.strip().lower() == addr:
                 return ActionModel(action="ARCHIVE")
         return ActionModel(action="NO_OP")
 
@@ -130,26 +133,24 @@ def get_label_map(service, user_id="me"):
 def list_messages(service, user_id="me", query="", max_results=None):
     """List messages matching the specified query"""
     try:
-        response = service.users().messages().list(userId=user_id, q=query).execute()
         messages = []
+        if max_results is not None and max_results <= 0:
+            return messages
 
-        if "messages" in response:
-            messages.extend(response["messages"])
+        page_token = None
+        while True:
+            list_kwargs = {"userId": user_id, "q": query}
+            if page_token is not None:
+                list_kwargs["pageToken"] = page_token
+            if max_results is not None:
+                list_kwargs["maxResults"] = min(500, max_results - len(messages))
 
-        while "nextPageToken" in response:
-            page_token = response["nextPageToken"]
-            response = (
-                service.users()
-                .messages()
-                .list(
-                    userId=user_id,
-                    q=query,
-                    pageToken=page_token,
-                    maxResults=max_results,
-                )
-                .execute()
-            )
-            messages.extend(response["messages"])
+            response = service.users().messages().list(**list_kwargs).execute()
+            messages.extend(response.get("messages", []))
+            if max_results is not None and len(messages) >= max_results:
+                break
+            if (page_token := response.get("nextPageToken")) is None:
+                break
 
         return messages[:max_results]
     except Exception as e:
@@ -387,12 +388,14 @@ def get_unsubscribe_info(service, msg_id, user_id="me"):
     return meta["headers"].get("list-unsubscribe")
 
 
-def main(rule_file_path, interval_seconds=600, **process_kwargs):
+def main(rule_file_path, interval_seconds=600, run_once=False, **process_kwargs):
     console = Console()
     try:
         while True:
             print(time.strftime("%Y-%m-%d %H:%M"))
             process(rule_file_path, **process_kwargs)
+            if run_once:
+                break
             if interval_seconds > 0:
                 next_wake = datetime.now() + timedelta(seconds=interval_seconds)
                 console.print(Rule(style="blue"))
@@ -406,43 +409,17 @@ def main(rule_file_path, interval_seconds=600, **process_kwargs):
         raise SystemExit(0)
 
 
-def process(rule_file_path, query=None, content_preview_length=0):
-    rule_path = Path(rule_file_path)
-    if not rule_path.exists():
-        console = Console()
-        console.print(
-            f"\n[bold yellow]Rules file not found:[/bold yellow] {rule_path}\n"
-        )
-        response = (
-            input("Would you like to create a starter rules file? [Y/n] ")
-            .strip()
-            .lower()
-        )
-        if response in ("", "y", "yes"):
-            default_rules = MailRuleModel(
-                rule_version="1",
-                from_domain_auto_delete=[],
-                from_address_auto_archive=[],
-            )
-            rule_path.parent.mkdir(parents=True, exist_ok=True)
-            rule_path.write_text(
-                json.dumps(default_rules.model_dump(), indent=2) + "\n"
-            )
-            console.print(
-                f"\n[bold green]✅ Created rules file:[/bold green] {rule_path}"
-            )
-            console.print("[dim]Edit it to add your rules, then run again.[/dim]\n")
-        else:
-            console.print(
-                "\n[dim]No file created. Create one manually and try again.[/dim]\n"
-            )
-        raise SystemExit(0)
-    mail_rules = MailRuleModel.model_validate_json(rule_path.read_text())
+def process(rule_file_path, query=None, content_preview_length=0, dry_run=False):
+    mail_rules, rule_path = _load_or_init_rules(rule_file_path)
     # print(mail_rules)
 
     # Authenticate and create service
     service = authenticate()
     console = Console()
+    if dry_run:
+        console.print(
+            "[bold yellow]Dry run:[/bold yellow] no mailbox changes will be made.\n"
+        )
     # List all messages
     if query is None:
         messages = list_unread_messages(service)
@@ -474,20 +451,23 @@ def process(rule_file_path, query=None, content_preview_length=0):
             label_names = [label_map.get(_, _) for _ in msg_details["labelIds"]]
             table.add_row("Labels", " | ".join(label_names))
             table.add_row("From", msg_details["from"])
+            table.add_row("Subject", msg_details["subject"])
             # breakpoint()
             if action == "DELETE":
-                if delete_message(service, msg_details["id"]):
+                if dry_run:
+                    table.add_row("Action Preview", f"🧪: {action}")
+                elif delete_message(service, msg_details["id"]):
                     table.add_row("Action Applied", f"✅: {action}")
                 else:
                     table.add_row("Action Applied", f"❌: {action}")
             elif action == "ARCHIVE":
-                if archive_emails(service, [msg_details["id"]]):
+                if dry_run:
+                    table.add_row("Action Preview", f"🧪: {action}")
+                elif archive_emails(service, [msg_details["id"]]):
                     table.add_row("Action Applied", f"📦: {action}")
                 else:
                     table.add_row("Action Applied", f"❌: {action}")
             else:
-                # table.add_row("To", details['to'])
-                table.add_row("Subject", msg_details["subject"])
                 table.add_row("Action Recommended", f"💡: {action}")
                 if content_preview_length > 0:
                     table.add_row(
@@ -500,6 +480,151 @@ def process(rule_file_path, query=None, content_preview_length=0):
                 table, title=msg_details["subject"][:80], expand=False
             )
             console.print(message_panel)
+
+
+def extract_email_and_domain(from_header):
+    """Extract email address and domain from a From header like 'Name <user@example.com>'."""
+    _name, addr = email.utils.parseaddr(from_header)
+    addr = addr.strip().lower()
+    domain = addr.split("@", 1)[1] if "@" in addr else None
+    return addr, domain
+
+
+def _load_or_init_rules(rule_path):
+    """Load rules from file, or prompt to create a starter file if missing."""
+    rule_path = Path(rule_path)
+    if rule_path.exists():
+        return MailRuleModel.model_validate_json(rule_path.read_text()), rule_path
+    console = Console()
+    console.print(f"\n[bold yellow]Rules file not found:[/bold yellow] {rule_path}\n")
+    if Confirm.ask("Create a starter rules file?", default=True):
+        rules = MailRuleModel(
+            rule_version="1",
+            from_domain_auto_delete=[],
+            from_address_auto_archive=[],
+        )
+        rule_path.parent.mkdir(parents=True, exist_ok=True)
+        rule_path.write_text(json.dumps(rules.model_dump(), indent=2) + "\n")
+        console.print(f"\n[bold green]✅ Created rules file:[/bold green] {rule_path}")
+        return rules, rule_path
+    console.print("\n[dim]No file created. Create one manually and try again.[/dim]\n")
+    raise SystemExit(0)
+
+
+def interactive_mode(rule_file_path, query=None):
+    """Interactive mode: review unread messages and build rules one at a time."""
+    console = Console()
+    mail_rules, rule_path = _load_or_init_rules(rule_file_path)
+
+    service = authenticate()
+    profile = get_profile(service)
+    console.print(f"\n[bold]Interactive Mode[/bold] — {profile['emailAddress']}\n")
+
+    if query is None:
+        messages = list_unread_messages(service)
+        console.print(f"Found [bold]{len(messages)}[/bold] unread messages\n")
+    else:
+        messages = list_messages(service, query=query, max_results=50)
+        console.print(f"Found [bold]{len(messages)}[/bold] messages matching query\n")
+
+    if not messages:
+        console.print("[dim]Nothing to review.[/dim]")
+        return
+
+    label_map = get_label_map(service)
+
+    new_delete_domains: list[str] = []
+    new_archive_addresses: list[str] = []
+    reviewed = 0
+
+    for i, msg in enumerate(messages, 1):
+        details = get_message_details(service, msg["id"])
+        if not details:
+            continue
+
+        addr, domain = extract_email_and_domain(details["from"])
+        existing_action = mail_rules.process_message(details)
+
+        # display message
+        table = Table(show_header=False, box=None)
+        table.add_column(style="bold")
+        table.add_column()
+        table.add_row("From", details["from"])
+        table.add_row("Subject", details["subject"])
+        label_names = [label_map.get(lid, lid) for lid in details["labelIds"]]
+        table.add_row("Labels", " | ".join(label_names))
+        unsub = details["headers"].get("List-Unsubscribe")
+        if unsub:
+            table.add_row("Unsubscribe", unsub)
+        if existing_action.action != "NO_OP":
+            table.add_row("Existing Rule", f"[dim]{existing_action.action}[/dim]")
+
+        panel = Panel(
+            table,
+            title=f"[{i}/{len(messages)}] {details['subject'][:70]}",
+            expand=False,
+        )
+        console.print(panel)
+
+        choice = Prompt.ask(
+            "  Action",
+            choices=["d", "a", "s", "q"],
+            default="s",
+        )
+        if choice == "q":
+            break
+        elif choice == "d" and domain:
+            if (
+                domain not in mail_rules.from_domain_auto_delete
+                and domain not in new_delete_domains
+            ):
+                new_delete_domains.append(domain)
+                console.print(f"  [yellow]+ delete domain:[/yellow] {domain}\n")
+            else:
+                console.print("  [dim]already in rules[/dim]\n")
+        elif choice == "a" and addr:
+            if (
+                addr not in mail_rules.from_address_auto_archive
+                and addr not in new_archive_addresses
+            ):
+                new_archive_addresses.append(addr)
+                console.print(f"  [yellow]+ archive address:[/yellow] {addr}\n")
+            else:
+                console.print("  [dim]already in rules[/dim]\n")
+        else:
+            console.print()
+
+        reviewed += 1
+
+    # summary
+    if not new_delete_domains and not new_archive_addresses:
+        console.print(
+            f"\n[dim]Reviewed {reviewed} messages. No new rules to add.[/dim]\n"
+        )
+        return
+
+    console.print(Rule(style="blue"))
+    console.print("\n[bold]Proposed rule changes:[/bold]\n")
+    if new_delete_domains:
+        console.print("[red]  Auto-delete domains:[/red]")
+        for d in new_delete_domains:
+            console.print(f"    + {d}")
+    if new_archive_addresses:
+        console.print("[yellow]  Auto-archive addresses:[/yellow]")
+        for a in new_archive_addresses:
+            console.print(f"    + {a}")
+
+    console.print()
+    if not Confirm.ask("Save these rules?", default=True):
+        console.print("[dim]Discarded.[/dim]\n")
+        return
+
+    mail_rules.from_domain_auto_delete.extend(new_delete_domains)
+    mail_rules.from_address_auto_archive.extend(new_archive_addresses)
+    rule_path.write_text(json.dumps(mail_rules.model_dump(), indent=2) + "\n")
+    console.print(
+        f"\n[bold green]✅ Saved {len(new_delete_domains) + len(new_archive_addresses)} new rules to {rule_path}[/bold green]\n"
+    )
 
 
 def self_test():
@@ -710,20 +835,38 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process Gmail with rules.")
     subparsers = parser.add_subparsers(dest="command")
 
-    # default 'run' command (also runs when no subcommand given)
-    run_parser = subparsers.add_parser("run", help="Run the mail processing loop")
-    run_parser.add_argument(
-        "--rules",
-        type=Path,
-        default=default_rules_file,
-        help="Path to rules config file",
-    )
-    run_parser.add_argument(
-        "--query", type=str, default=None, help="Optional search query"
-    )
-    run_parser.add_argument(
-        "--interval-seconds", type=int, default=600, help="interval in seconds"
-    )
+    # shared args for run and interactive
+    for sub_name, sub_help in [
+        ("run", "Run the mail processing loop"),
+        ("interactive", "Interactively review messages and build rules"),
+    ]:
+        sub = subparsers.add_parser(sub_name, help=sub_help)
+        sub.add_argument(
+            "--rules",
+            type=Path,
+            default=default_rules_file,
+            help="Path to rules config file",
+        )
+        sub.add_argument(
+            "--query", type=str, default=None, help="Optional search query"
+        )
+        if sub_name == "run":
+            sub.add_argument(
+                "--interval-seconds",
+                type=int,
+                default=600,
+                help="interval in seconds",
+            )
+            sub.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="preview actions without changing Gmail",
+            )
+            sub.add_argument(
+                "--once",
+                action="store_true",
+                help="process one pass and exit",
+            )
 
     # self-test subcommand
     subparsers.add_parser(
@@ -734,14 +877,20 @@ if __name__ == "__main__":
 
     if args.command == "self-test":
         self_test()
+    elif args.command == "interactive":
+        interactive_mode(args.rules, query=args.query)
     else:
         # default to 'run' behavior (with or without subcommand)
         rules = getattr(args, "rules", default_rules_file)
         query = getattr(args, "query", None)
         interval = getattr(args, "interval_seconds", 600)
+        dry_run = getattr(args, "dry_run", False)
+        run_once = getattr(args, "once", False)
         main(
             rules,
             query=query,
             content_preview_length=0,
             interval_seconds=interval,
+            dry_run=dry_run,
+            run_once=run_once,
         )
