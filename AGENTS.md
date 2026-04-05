@@ -23,6 +23,8 @@
   `uv run gmail_genie.py` still works because the script falls back to `run`
   when no subcommand is provided.
 - One-shot processing: `uv run gmail_genie.py run --once`.
+- LLM-enabled one-shot processing:
+  `uv run gmail_genie.py run --once --enable-llm`.
 - Safe preview: `uv run gmail_genie.py run --dry-run --once`.
 - Lockfile refresh: `uv lock`.
 - Lint: `just lint`. Today that runs `shellcheck` on tracked shell files,
@@ -44,10 +46,11 @@
 
 ## Live Gmail Safety
 
-- Anything beyond `--help` uses a real Gmail account. `run` can archive or
-  trash messages immediately based on the active rules.
+- Anything beyond `--help` uses a real Gmail account. `run` can archive,
+  trash, mark messages as spam, or unsubscribe immediately based on the active
+  rules and fallback classifiers.
 - `run --dry-run` still reads the live mailbox and authenticates, but it does
-  not archive or trash messages.
+  not archive, trash, mark spam, or unsubscribe messages.
 - `interactive` reads live mail and updates the rules JSON only after
   confirmation; it does not modify mailbox contents.
 - `self-test` is a live integration test, not a unit test. It creates and
@@ -69,18 +72,38 @@
   avoid changing the app's auth/config code.
 - `gcloud-scheduled-jobs/.env.local` optionally supports `NTFY_BASE_URL` and
   `NTFY_TOPIC` for push notifications. The app only notifies when a non-dry-run
-  pass actually archives, deletes, or unsubscribes messages, plus fatal
-  failures.
+  pass actually archives, deletes, marks spam, or unsubscribes messages, plus
+  fatal failures.
+- `TAILSCALE_AUTHKEY` (optional) enables the Cloud Run Job to join your Tailnet.
+  Generate an ephemeral auth key at https://login.tailscale.com/admin/settings/keys
+  with auto-removal and auto-approval enabled for seamless ephemeral node cleanup.
+- `TAILNET_*` environment variables (optional) hold Tailscale IP addresses for
+  services running on your tailnet. Run `tailscale status` to find IPs, then add
+  them as `TAILNET_SERVICE_NAME=100.x.x.x` in `.env.local` (e.g.,
+  `TAILNET_LLM_API_IP=100.81.183.108`). The Cloud Run Job can then access these
+  services via the SOCKS5 proxy or direct userspace networking.
 - Those mounted secret files are read-only. `authenticate()` now tolerates a
   read-only `token.pickle` by refreshing in memory and continuing without
   persisting the refreshed token.
 - Missing rules files are bootstrapped at runtime by `_load_or_init_rules()`,
-  which prompts to create a starter JSON. The README mentions
-  `rules_examples.json`, but that file is not present in this repo.
+  which prompts to create a starter JSON. A tracked example config now lives at
+  `rules.example.json`.
 - The current rule schema is `rule_version`, `from_domain_auto_delete`,
-  `from_address_auto_archive`, and `from_address_auto_unsubscribe` (RFC 8058
-  one-click POST). If rule behavior changes, update `MailRuleModel`,
-  interactive rule building, and starter-file creation together.
+  `from_address_auto_archive`, `from_address_auto_spam`,
+  `from_address_auto_unsubscribe`, `body_contains`, and `ml_action`.
+  `body_contains` is an ordered list of `{contains, action}` rules for naive
+  case-insensitive body substring matching. `ml_action` configures a local
+  multinomial naive Bayes fallback model. Successful actions are also labeled
+  with a user label in the form `genie/<action>`. If rule behavior changes,
+  update `MailRuleModel`, interactive rule building, and starter-file creation
+  together.
+- Rule evaluation order is fixed: delete-by-domain, then archive-by-address,
+  then spam-by-address, then one-click unsubscribe-by-address, then ordered
+  body substring rules, then `ml-action`, then optional `llm-action`, then
+  no-op. The `llm-action` fallback uses the system prompt in
+  `llm_action_system_prompt.txt`, which instructs GPT-4-class models to classify
+  emails as ARCHIVE, DELETE, SPAM, UNSUBSCRIBE, or NO_OP with confidence scores.
+  Responses below 0.70 confidence default to NO_OP for safety.
 
 ## Gotchas
 

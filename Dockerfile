@@ -7,9 +7,24 @@ WORKDIR /app
 
 COPY .python-version pyproject.toml README.md uv.lock ./
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        jq \
+        netcat-openbsd \
+        procps \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN uv sync --locked --no-dev
 
-COPY gmail_genie.py ./
+# Install Tailscale binaries for optional Cloud Run VPN support
+COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscaled /usr/local/bin/tailscale /usr/local/bin/
 
-ENTRYPOINT ["uv", "run", "--locked", "--no-sync", "gmail_genie.py"]
-CMD ["run", "--once"]
+RUN mkdir -p /var/run/tailscale /var/cache/tailscale /var/lib/tailscale
+
+COPY gmail_genie.py ./
+COPY gcloud-scheduled-jobs/start.sh ./
+
+RUN chmod +x ./start.sh
+
+ENTRYPOINT ["./start.sh"]

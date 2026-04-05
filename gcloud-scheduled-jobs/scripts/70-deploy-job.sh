@@ -20,13 +20,14 @@ deploy_args=(
   --command="/bin/sh"
   --args="-ceu,$STARTUP_COMMAND"
   --set-secrets="$SECRET_MOUNTS"
+  --remove-env-vars="TAILSCALE_AUTHKEY"
 )
 
 if [[ -n "$JOB_ENV_VARS" ]]; then
   deploy_args+=(--update-env-vars="$JOB_ENV_VARS")
 fi
 
-gcloud run jobs deploy "$CLOUD_RUN_JOB_NAME" "${deploy_args[@]}" >/dev/null
+gcloud run jobs deploy "$CLOUD_RUN_JOB_NAME" "${deploy_args[@]}"
 
 ensure_job_invoker_binding
 log "Cloud Run job deployment complete"

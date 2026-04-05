@@ -1,0 +1,26 @@
+{
+  "rule_version": "1",
+  "from_domain_auto_delete": [
+    "promo.example"
+  ],
+  "from_address_auto_archive": [
+    "receipts@example.com"
+  ],
+  "from_address_auto_spam": [
+    "sales@example.com"
+  ],
+  "from_address_auto_unsubscribe": [
+    "newsletter@example.com"
+  ],
+  "ml_action": {
+    "enabled": true,
+    "model_path": "~/.config/gmail-genie/ml-action-model.json",
+    "min_confidence": 0.85
+  },
+  "body_contains": [
+    {
+      "contains": "your application has been accepted",
+      "action": "ARCHIVE"
+    }
+  ]
+}
