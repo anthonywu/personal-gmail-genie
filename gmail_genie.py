@@ -317,7 +317,7 @@ def process(rule_file_path, query=None, content_preview_length=0):
 if __name__ == "__main__":
     import argparse
 
-    default_rules_file = Path("~/.config/gmail-genie/my_rules.json").expanduser()
+    default_rules_file = Path("~/.config/gmail-genie/rules.json").expanduser()
     parser = argparse.ArgumentParser(description="Process Gmail with rules.")
     parser.add_argument(
         "--rules",
