@@ -230,7 +230,17 @@ def main(rule_file_path, interval_seconds=600, **process_kwargs):
 
 
 def process(rule_file_path, query=None, content_preview_length=0):
-    mail_rules = MailRuleModel.model_validate_json(Path(rule_file_path).read_text())
+    rule_path = Path(rule_file_path)
+    if not rule_path.exists():
+        console = Console()
+        console.print(f"\n[bold red]Rules file not found:[/bold red] {rule_path}\n")
+        console.print("[bold]To get started:[/bold]")
+        console.print("  1. Copy the example rules file:")
+        console.print(f"     cp rules_examples.json {rule_path}")
+        console.print("  2. Edit it to match your preferences")
+        console.print(f"  3. Run again: uv run gmail_genie.py --rules {rule_path}\n")
+        raise SystemExit(1)
+    mail_rules = MailRuleModel.model_validate_json(rule_path.read_text())
     # print(mail_rules)
 
     # Authenticate and create service
