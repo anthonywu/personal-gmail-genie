@@ -28,9 +28,8 @@ agentic assistants to their email.
 
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh # or `brew install uv`
-   # the script is a 'uv run' script with all dependencies defined in the
-   # comment header
-   uv run gmail_genie.py
+   uv sync
+   uv run gmail_genie.py --help
    ```
 
 3. Create your rules file (see `rules_examples.json` for template)
@@ -43,6 +42,8 @@ Run manually:
 uv run gmail_genie.py run [--rules PATH] [--query QUERY]
   [--interval-seconds SECONDS] [--dry-run] [--once]
 ```
+
+Dependencies are tracked in `pyproject.toml` and `uv.lock`.
 
 Use `--once` to process a single pass and exit instead of polling forever.
 Use `--dry-run` to preview archive/delete decisions without changing Gmail.
@@ -64,7 +65,8 @@ chmod +x macOS-scheduler/gmail_genie_launcher.sh
 # Other commands
 ./macOS-scheduler/gmail_genie_launcher.sh status    # Check if running
 ./macOS-scheduler/gmail_genie_launcher.sh logs      # View recent logs
-./macOS-scheduler/gmail_genie_launcher.sh tail      # Follow logs in real-time (Ctrl+C to exit)
+./macOS-scheduler/gmail_genie_launcher.sh tail      # Follow logs in real-time
+                                                  # (Ctrl+C to exit)
 ./macOS-scheduler/gmail_genie_launcher.sh stop      # Stop the service
 ./macOS-scheduler/gmail_genie_launcher.sh restart   # Restart the service
 ./macOS-scheduler/gmail_genie_launcher.sh uninstall # Remove the Launch Agent

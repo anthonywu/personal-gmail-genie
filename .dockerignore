@@ -1,0 +1,12 @@
+.git/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pickle
+.venv/
+.env.*
+credentials.json
+token.json
+plan/
+gcloud-scheduled-jobs/.env.local
