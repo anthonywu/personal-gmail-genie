@@ -67,6 +67,10 @@
 - The Cloud Run Job scaffold mounts Secret Manager secrets back onto those same
   config file paths inside the container under `/root/.config/gmail-genie/` to
   avoid changing the app's auth/config code.
+- `gcloud-scheduled-jobs/.env.local` optionally supports `NTFY_BASE_URL` and
+  `NTFY_TOPIC` for push notifications. The app only notifies when a non-dry-run
+  pass actually archives, deletes, or unsubscribes messages, plus fatal
+  failures.
 - Those mounted secret files are read-only. `authenticate()` now tolerates a
   read-only `token.pickle` by refreshing in memory and continuing without
   persisting the refreshed token.

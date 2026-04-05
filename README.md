@@ -48,6 +48,10 @@ Dependencies are tracked in `pyproject.toml` and `uv.lock`.
 Use `--once` to process a single pass and exit instead of polling forever.
 Use `--dry-run` to preview archive/delete decisions without changing Gmail.
 
+For Cloud Run, `gcloud-scheduled-jobs/.env.local` also supports optional
+`NTFY_BASE_URL` and `NTFY_TOPIC` settings. When configured, the job only sends
+an `ntfy` push if it actually archives, deletes, or unsubscribes something.
+
 Run the container locally with your existing Gmail config mounted in:
 
 ```bash

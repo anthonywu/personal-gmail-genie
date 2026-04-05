@@ -4,7 +4,7 @@ default:
     @just --list
 
 shellcheck:
-    git ls-files -z '*.sh' '*.bash' | xargs -0 shellcheck
+    git ls-files -z '*.sh' '*.bash' | xargs -0 shellcheck -x -P gcloud-scheduled-jobs/scripts
 
 justfmt:
     just --unstable --fmt

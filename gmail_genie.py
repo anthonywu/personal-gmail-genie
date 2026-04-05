@@ -4,10 +4,11 @@ import email.mime.text
 import email.utils
 import functools
 import itertools
-import re
 import json
-import time
+import os
 import pickle
+import re
+import time
 from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -26,6 +27,8 @@ from typing import Literal
 
 CONFIG_DIR = Path("~/.config/gmail-genie").expanduser()
 AUTH_TOKEN_FILE = CONFIG_DIR / "token.pickle"
+NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "https://ntfy.sh").rstrip("/")
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
 LOG_DIR = (
     Path("~/.local/share/gmail_genie").expanduser().mkdir(parents=True, exist_ok=True)
 )
@@ -108,6 +111,27 @@ def authenticate():
             )
 
     return build("gmail", "v1", credentials=creds)
+
+
+def notify_ntfy(title: str, message: str, priority: str = "default") -> None:
+    """Send a push notification to ntfy when configured."""
+    if not NTFY_TOPIC:
+        return
+
+    try:
+        response = httpx.post(
+            f"{NTFY_BASE_URL}/{NTFY_TOPIC}",
+            content=message.encode("utf-8"),
+            headers={
+                "Title": title,
+                "Priority": priority,
+                "Tags": "email",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        print(f"Warning: failed to send ntfy notification: {exc}")
 
 
 class LabelModel(BaseModel):
@@ -425,7 +449,23 @@ def main(rule_file_path, interval_seconds=600, run_once=False, **process_kwargs)
     try:
         while True:
             print(time.strftime("%Y-%m-%d %H:%M"))
-            process(rule_file_path, **process_kwargs)
+            try:
+                summary = process(rule_file_path, **process_kwargs)
+            except Exception as exc:
+                notify_ntfy("Gmail Genie failed", str(exc), priority="high")
+                raise
+            action_count = (
+                summary["archived"] + summary["deleted"] + summary["unsubscribed"]
+            )
+            if action_count > 0 and not process_kwargs.get("dry_run", False):
+                notify_ntfy(
+                    "Gmail Genie took action",
+                    (
+                        f"Processed {summary['processed']} messages. "
+                        f"Archived {summary['archived']}, deleted {summary['deleted']}, "
+                        f"unsubscribed {summary['unsubscribed']}."
+                    ),
+                )
             if run_once:
                 break
             if interval_seconds > 0:
@@ -459,6 +499,12 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
     else:
         messages = list_messages(service, query=query, max_results=50)
         print(f"Found {len(messages)} messages matching query")
+    summary = {
+        "processed": len(messages),
+        "archived": 0,
+        "deleted": 0,
+        "unsubscribed": 0,
+    }
 
     messages_actions: list[dict, ActionModel] = []
     for msg in messages:
@@ -489,6 +535,7 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
                 if dry_run:
                     table.add_row("Action Preview", f"🧪: {action}")
                 elif delete_message(service, msg_details["id"]):
+                    summary["deleted"] += 1
                     table.add_row("Action Applied", f"✅: {action}")
                 else:
                     table.add_row("Action Applied", f"❌: {action}")
@@ -496,6 +543,7 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
                 if dry_run:
                     table.add_row("Action Preview", f"🧪: {action}")
                 elif archive_emails(service, [msg_details["id"]]):
+                    summary["archived"] += 1
                     table.add_row("Action Applied", f"📦: {action}")
                 else:
                     table.add_row("Action Applied", f"❌: {action}")
@@ -511,6 +559,7 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
                         table.add_row("Unsubscribe URL", unsub_url)
                 elif unsub_url:
                     if post_one_click_unsubscribe(unsub_url):
+                        summary["unsubscribed"] += 1
                         table.add_row("Action Applied", f"✅: {action}")
                         archive_emails(service, [msg_details["id"]])
                     else:
@@ -532,6 +581,8 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
                 table, title=msg_details["subject"][:80], expand=False
             )
             console.print(message_panel)
+
+    return summary
 
 
 def extract_email_and_domain(from_header):

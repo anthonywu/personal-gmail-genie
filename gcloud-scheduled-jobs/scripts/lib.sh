@@ -68,8 +68,13 @@ derive_defaults() {
   JOB_RUN_URI="https://run.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/jobs/${CLOUD_RUN_JOB_NAME}:run"
   SECRET_MOUNTS="/var/run/gmail-genie/credentials/credentials.json=${SECRET_GMAIL_CREDENTIALS_JSON}:latest,/var/run/gmail-genie/token/token.pickle=${SECRET_GMAIL_TOKEN_PICKLE}:latest,/var/run/gmail-genie/rules/rules.json=${SECRET_GMAIL_RULES_JSON}:latest"
   STARTUP_COMMAND="mkdir -p /root/.config/gmail-genie && cp /var/run/gmail-genie/credentials/credentials.json /root/.config/gmail-genie/credentials.json && cp /var/run/gmail-genie/token/token.pickle /root/.config/gmail-genie/token.pickle && cp /var/run/gmail-genie/rules/rules.json /root/.config/gmail-genie/rules.json && exec uv run --locked --no-sync gmail_genie.py run --once"
+  NTFY_BASE_URL="${NTFY_BASE_URL:-https://ntfy.sh}"
+  JOB_ENV_VARS=""
+  if [[ -n "${NTFY_TOPIC:-}" ]]; then
+    JOB_ENV_VARS="NTFY_BASE_URL=${NTFY_BASE_URL},NTFY_TOPIC=${NTFY_TOPIC}"
+  fi
 
-  export RUNTIME_SERVICE_ACCOUNT_EMAIL SCHEDULER_SERVICE_ACCOUNT_EMAIL IMAGE_URI JOB_RUN_URI SECRET_MOUNTS STARTUP_COMMAND
+  export RUNTIME_SERVICE_ACCOUNT_EMAIL SCHEDULER_SERVICE_ACCOUNT_EMAIL IMAGE_URI JOB_RUN_URI SECRET_MOUNTS STARTUP_COMMAND NTFY_BASE_URL JOB_ENV_VARS
 }
 
 validate_required_vars() {
