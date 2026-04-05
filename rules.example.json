@@ -12,6 +12,11 @@
   "from_address_auto_unsubscribe": [
     "newsletter@example.com"
   ],
+  "ml_action": {
+    "enabled": true,
+    "model_path": "~/.config/gmail-genie/ml-action-model.json",
+    "min_confidence": 0.85
+  },
   "body_contains": [
     {
       "contains": "your application has been accepted",

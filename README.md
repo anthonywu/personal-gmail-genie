@@ -44,7 +44,7 @@ Run manually:
 
 ```bash
 uv run gmail_genie.py run [--rules PATH] [--query QUERY]
-  [--interval-seconds SECONDS] [--dry-run] [--once]
+  [--interval-seconds SECONDS] [--dry-run] [--once] [--enable-llm]
 ```
 
 Dependencies are tracked in `pyproject.toml` and `uv.lock`.
@@ -52,6 +52,8 @@ Dependencies are tracked in `pyproject.toml` and `uv.lock`.
 Use `--once` to process a single pass and exit instead of polling forever.
 Use `--dry-run` to preview archive, trash, spam, and unsubscribe decisions
 without changing Gmail.
+Use `--enable-llm` to turn on the `llm-action` fallback classifier for that run.
+Startup output prints whether `ml-action` and `llm-action` are on or off.
 
 For Cloud Run, `gcloud-scheduled-jobs/.env.local` also supports optional
 `NTFY_BASE_URL` and `NTFY_TOPIC` settings. When configured, the job only sends
@@ -112,6 +114,11 @@ The current rules file is a single JSON object:
   "from_address_auto_unsubscribe": [
     "newsletter@example.com"
   ],
+  "ml_action": {
+    "enabled": true,
+    "model_path": "~/.config/gmail-genie/ml-action-model.json",
+    "min_confidence": 0.85
+  },
   "body_contains": [
     {
       "contains": "your application has been accepted",
@@ -131,6 +138,9 @@ The current rules file is a single JSON object:
 - `from_address_auto_unsubscribe` matches the full sender email address,
   case-insensitively, but only when the message includes the
   `List-Unsubscribe-Post` header required for one-click unsubscribe.
+- `ml_action` configures the local `ml-action` fallback classifier. The current
+  implementation uses a CPU-friendly multinomial naive Bayes model loaded from
+  a local JSON artifact.
 - `body_contains` is an ordered list of naive substring rules. Each rule checks
   whether the decoded message body contains `contains`, case-insensitively, and
   if it does, returns the configured `action`.
@@ -144,13 +154,16 @@ The rules engine uses a fixed first-match order:
 3. Exact-address spam
 4. Exact-address one-click unsubscribe
 5. Ordered body substring rules
-6. No-op
+6. `ml-action`
+7. `llm-action` when `--enable-llm` is set
+8. No-op
 
 That order matters. A sender domain in `from_domain_auto_delete` overrides the
 address-based rules for the same message. Likewise, an address in
 `from_address_auto_archive` wins before `from_address_auto_unsubscribe` is
 considered, and `from_address_auto_spam` wins before unsubscribe. Body rules
-only run if no sender-based rule matched first.
+only run if no sender-based rule matched first. The fallback classifiers only
+run after all hardcoded rules return `NO_OP`.
 
 ### Action Semantics
 
@@ -174,6 +187,29 @@ Body matching is intentionally naive. Gmail Genie performs a normalized,
 case-insensitive substring check against the decoded message body text it
 extracts from the message payload, preferring `text/plain` parts when they are
 available.
+
+### Fallback Classifiers
+
+- `ml-action` is the first fallback after hardcoded rules miss. It runs a local
+  multinomial naive Bayes classifier from `ml_action.model_path`. If the model
+  file is missing or its confidence is below `ml_action.min_confidence`, it
+  returns `NO_OP`.
+- `llm-action` is the second fallback and is disabled by default. Enable it per
+  run with `uv run gmail_genie.py run --enable-llm ...`.
+- `llm-action` sends the full extracted email body to an OpenAI-compatible
+  `/chat/completions` endpoint and expects a JSON response with `action`,
+  `confidence`, and `reason`.
+- `UNSUBSCRIBE` is only accepted from fallback classifiers when the email
+  advertises one-click unsubscribe support.
+
+Configure `llm-action` with environment variables:
+
+- `LLM_ACTION_BASE_URL`
+- `LLM_ACTION_MODEL`
+- `LLM_ACTION_API_KEY`
+- `LLM_ACTION_TIMEOUT_SECONDS` optional, defaults to `30`
+
+An example ML artifact schema is tracked at `ml_action_model.example.json`.
 
 ### Message Selection
 

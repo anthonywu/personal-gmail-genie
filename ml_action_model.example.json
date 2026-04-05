@@ -1,0 +1,50 @@
+{
+  "model_version": "1",
+  "model_type": "multinomial_nb",
+  "class_log_priors": {
+    "ARCHIVE": -1.5,
+    "DELETE": -1.8,
+    "SPAM": -1.6,
+    "UNSUBSCRIBE": -1.9,
+    "NO_OP": -1.2
+  },
+  "default_token_log_probs": {
+    "ARCHIVE": -9.5,
+    "DELETE": -10.0,
+    "SPAM": -9.8,
+    "UNSUBSCRIBE": -10.2,
+    "NO_OP": -9.2
+  },
+  "token_log_probs": {
+    "ARCHIVE": {
+      "accepted": -2.2,
+      "application": -2.4,
+      "receipt": -2.5,
+      "confirmed": -2.6
+    },
+    "DELETE": {
+      "expired": -2.3,
+      "final": -2.5,
+      "notice": -2.7,
+      "failed": -2.8
+    },
+    "SPAM": {
+      "offer": -2.1,
+      "winner": -2.3,
+      "prize": -2.4,
+      "discount": -2.5
+    },
+    "UNSUBSCRIBE": {
+      "newsletter": -2.2,
+      "digest": -2.4,
+      "mailing": -2.6,
+      "subscription": -2.7
+    },
+    "NO_OP": {
+      "meeting": -2.1,
+      "question": -2.3,
+      "thread": -2.4,
+      "update": -2.6
+    }
+  }
+}
