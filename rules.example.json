@@ -6,7 +6,16 @@
   "from_address_auto_archive": [
     "receipts@example.com"
   ],
+  "from_address_auto_spam": [
+    "sales@example.com"
+  ],
   "from_address_auto_unsubscribe": [
     "newsletter@example.com"
+  ],
+  "body_contains": [
+    {
+      "contains": "your application has been accepted",
+      "action": "ARCHIVE"
+    }
   ]
 }

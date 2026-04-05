@@ -36,23 +36,33 @@ LOG_DIR = (
 
 # Define a model with Literal fields
 class ActionModel(BaseModel):
-    action: Literal["ARCHIVE", "DELETE", "UNSUBSCRIBE", "NO_OP"]
+    action: Literal["ARCHIVE", "DELETE", "SPAM", "UNSUBSCRIBE", "NO_OP"]
+
+
+class BodyContainsRuleModel(BaseModel):
+    """Naive case-insensitive substring rule for message body matching."""
+
+    contains: str
+    action: Literal["ARCHIVE", "DELETE", "SPAM", "UNSUBSCRIBE"]
 
 
 class MailRuleModel(BaseModel):
-    """Persisted rules schema for sender-based mailbox automation."""
+    """Persisted rules schema for sender and body based mailbox automation."""
 
     rule_version: str
     from_domain_auto_delete: list[str]
     from_address_auto_archive: list[str]
+    from_address_auto_spam: list[str] = []
     from_address_auto_unsubscribe: list[str] = []
+    body_contains: list[BodyContainsRuleModel] = []
 
     def process_message(self, message_dict) -> ActionModel:
         """Return the first matching action for a message.
 
         Rule precedence is fixed: delete by sender domain, then archive by
-        exact sender address, then one-click unsubscribe by exact sender
-        address. Sender matching is case-insensitive after parsing the
+        exact sender address, then spam by exact sender address, then
+        one-click unsubscribe by exact sender address, then ordered body
+        substring rules. Sender matching is case-insensitive after parsing the
         normalized address from the `From` header.
         """
         addr, domain = extract_email_and_domain(message_dict["from"])
@@ -62,6 +72,9 @@ class MailRuleModel(BaseModel):
         for domain_a in self.from_address_auto_archive:
             if domain_a.strip().lower() == addr:
                 return ActionModel(action="ARCHIVE")
+        for addr_s in self.from_address_auto_spam:
+            if addr_s.strip().lower() == addr:
+                return ActionModel(action="SPAM")
         headers = message_dict.get("headers", {})
         has_one_click = (
             "List-Unsubscribe-Post" in headers or "list-unsubscribe-post" in headers
@@ -69,6 +82,13 @@ class MailRuleModel(BaseModel):
         for addr_u in self.from_address_auto_unsubscribe:
             if addr_u.strip().lower() == addr and has_one_click:
                 return ActionModel(action="UNSUBSCRIBE")
+        normalized_content = normalize_body_match_text(message_dict.get("content", ""))
+        for body_rule in self.body_contains:
+            needle = normalize_body_match_text(body_rule.contains)
+            if not needle or needle not in normalized_content:
+                continue
+            if body_rule.action != "UNSUBSCRIBE" or has_one_click:
+                return ActionModel(action=body_rule.action)
         return ActionModel(action="NO_OP")
 
 
@@ -203,6 +223,38 @@ def list_messages(service, user_id="me", query="", max_results=None):
 list_unread_messages = functools.partial(list_messages, query="is:unread")
 
 
+def decode_message_body_part(part) -> str:
+    """Decode a Gmail payload part body as UTF-8 text."""
+    data = part.get("body", {}).get("data", "")
+    if not data:
+        return ""
+    try:
+        return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def extract_message_content(payload) -> str:
+    """Extract best-effort message text, preferring `text/plain` parts."""
+    if not payload:
+        return ""
+
+    mime_type = payload.get("mimeType", "")
+    if mime_type.startswith("multipart/"):
+        fallback = ""
+        for part in payload.get("parts", []):
+            content = extract_message_content(part)
+            if not content:
+                continue
+            if part.get("mimeType") == "text/plain":
+                return content
+            if not fallback:
+                fallback = content
+        return fallback
+
+    return decode_message_body_part(payload)
+
+
 def get_message_details(service, msg_id, user_id="me"):
     """Get details of a specific message"""
     try:
@@ -226,17 +278,7 @@ def get_message_details(service, msg_id, user_id="me"):
         from_email = next(h["value"] for h in headers if h["name"].lower() == "from")
         to_email = next(h["value"] for h in headers if h["name"].lower() == "to")
 
-        # Get message body
-        if "parts" in message["payload"]:
-            parts = message["payload"]["parts"]
-            data = parts[0]["body"].get("data", "")
-        else:
-            data = message["payload"]["body"].get("data", "")
-
-        if data:
-            content = base64.urlsafe_b64decode(data).decode("utf-8")
-        else:
-            content = "No content"
+        content = extract_message_content(message["payload"]) or "No content"
 
         # breakpoint()
         return {
@@ -274,6 +316,21 @@ def archive_emails(service, message_ids, user_id="me"):
                 userId=user_id, id=msg_id, body={"removeLabelIds": ["INBOX", "UNREAD"]}
             ).execute()
             print(f"Archived message with ID: {msg_id}")
+        return True
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return False
+
+
+def mark_message_as_spam(service, msg_id, user_id="me"):
+    """Mark a message as spam via Gmail's `SPAM` system label."""
+    try:
+        service.users().messages().modify(
+            userId=user_id,
+            id=msg_id,
+            body={"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]},
+        ).execute()
+        print(f"Message {msg_id} marked as spam successfully")
         return True
     except Exception as e:
         print(f"An error occurred: {e}")
@@ -359,6 +416,47 @@ def add_labels(service, msg_id, label_ids, user_id="me"):
         .modify(userId=user_id, id=msg_id, body={"addLabelIds": label_ids})
         .execute()
     )
+
+
+def get_label_name_to_id_map(service, user_id="me"):
+    """Retrieve a mapping of label names to their IDs."""
+    return {
+        name: label_id for label_id, name in get_label_map(service, user_id).items()
+    }
+
+
+def ensure_label(service, label_name, label_name_to_id, user_id="me"):
+    """Return an existing label ID or create the label if it does not exist."""
+    if label_name in label_name_to_id:
+        return label_name_to_id[label_name]
+    try:
+        label = create_label(service, label_name, user_id=user_id)
+        label_name_to_id[label["name"]] = label["id"]
+        return label["id"]
+    except Exception as exc:
+        print(f"Warning: could not ensure label {label_name!r}: {exc}")
+        label_name_to_id.update(get_label_name_to_id_map(service, user_id))
+        return label_name_to_id.get(label_name)
+
+
+def genie_action_label_name(action: str) -> str:
+    """Build the user label name used to tag acted-on messages."""
+    return f"genie/{action.lower()}"
+
+
+def apply_genie_action_label(service, msg_id, action, label_name_to_id, user_id="me"):
+    """Best-effort label application for messages acted on by Gmail Genie."""
+    label_id = ensure_label(
+        service, genie_action_label_name(action), label_name_to_id, user_id=user_id
+    )
+    if not label_id:
+        return False
+    try:
+        add_labels(service, msg_id, [label_id], user_id=user_id)
+        return True
+    except Exception as exc:
+        print(f"Warning: could not apply genie label for {msg_id}: {exc}")
+        return False
 
 
 def list_threads(service, user_id="me", query="", max_results=None):
@@ -457,7 +555,10 @@ def main(rule_file_path, interval_seconds=600, run_once=False, **process_kwargs)
                 notify_ntfy("Gmail Genie failed", str(exc), priority="high")
                 raise
             action_count = (
-                summary["archived"] + summary["deleted"] + summary["unsubscribed"]
+                summary["archived"]
+                + summary["deleted"]
+                + summary["spammed"]
+                + summary["unsubscribed"]
             )
             if action_count > 0 and not process_kwargs.get("dry_run", False):
                 notify_ntfy(
@@ -465,6 +566,7 @@ def main(rule_file_path, interval_seconds=600, run_once=False, **process_kwargs)
                     (
                         f"Processed {summary['processed']} messages. "
                         f"Archived {summary['archived']}, deleted {summary['deleted']}, "
+                        f"spammed {summary['spammed']}, "
                         f"unsubscribed {summary['unsubscribed']}."
                     ),
                 )
@@ -505,6 +607,7 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
         "processed": len(messages),
         "archived": 0,
         "deleted": 0,
+        "spammed": 0,
         "unsubscribed": 0,
     }
 
@@ -521,6 +624,7 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
     messages_actions = sorted(messages_actions, key=lambda x: x[1].action)
 
     label_map = get_label_map(service)
+    label_name_to_id = get_label_name_to_id_map(service)
     for action, group in itertools.groupby(messages_actions, key=lambda x: x[1].action):
         for msg_details, _ in group:
             # Create a table with two columns
@@ -536,17 +640,46 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
             if action == "DELETE":
                 if dry_run:
                     table.add_row("Action Preview", f"🧪: {action}")
+                    table.add_row(
+                        "Genie Label Preview", genie_action_label_name(action)
+                    )
                 elif delete_message(service, msg_details["id"]):
                     summary["deleted"] += 1
                     table.add_row("Action Applied", f"✅: {action}")
+                    if apply_genie_action_label(
+                        service, msg_details["id"], action, label_name_to_id
+                    ):
+                        table.add_row("Genie Label", genie_action_label_name(action))
                 else:
                     table.add_row("Action Applied", f"❌: {action}")
             elif action == "ARCHIVE":
                 if dry_run:
                     table.add_row("Action Preview", f"🧪: {action}")
+                    table.add_row(
+                        "Genie Label Preview", genie_action_label_name(action)
+                    )
                 elif archive_emails(service, [msg_details["id"]]):
                     summary["archived"] += 1
                     table.add_row("Action Applied", f"📦: {action}")
+                    if apply_genie_action_label(
+                        service, msg_details["id"], action, label_name_to_id
+                    ):
+                        table.add_row("Genie Label", genie_action_label_name(action))
+                else:
+                    table.add_row("Action Applied", f"❌: {action}")
+            elif action == "SPAM":
+                if dry_run:
+                    table.add_row("Action Preview", f"🧪: {action}")
+                    table.add_row(
+                        "Genie Label Preview", genie_action_label_name(action)
+                    )
+                elif mark_message_as_spam(service, msg_details["id"]):
+                    summary["spammed"] += 1
+                    table.add_row("Action Applied", f"🚫: {action}")
+                    if apply_genie_action_label(
+                        service, msg_details["id"], action, label_name_to_id
+                    ):
+                        table.add_row("Genie Label", genie_action_label_name(action))
                 else:
                     table.add_row("Action Applied", f"❌: {action}")
             elif action == "UNSUBSCRIBE":
@@ -557,6 +690,9 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
                 unsub_url = extract_one_click_unsubscribe_url(unsub_header)
                 if dry_run:
                     table.add_row("Action Preview", f"🧪: {action}")
+                    table.add_row(
+                        "Genie Label Preview", genie_action_label_name(action)
+                    )
                     if unsub_url:
                         table.add_row("Unsubscribe URL", unsub_url)
                 elif unsub_url:
@@ -564,6 +700,12 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
                         summary["unsubscribed"] += 1
                         table.add_row("Action Applied", f"✅: {action}")
                         archive_emails(service, [msg_details["id"]])
+                        if apply_genie_action_label(
+                            service, msg_details["id"], action, label_name_to_id
+                        ):
+                            table.add_row(
+                                "Genie Label", genie_action_label_name(action)
+                            )
                     else:
                         table.add_row("Action Applied", f"❌: {action} (POST failed)")
                 else:
@@ -595,6 +737,30 @@ def extract_email_and_domain(from_header):
     return addr, domain
 
 
+def normalize_body_match_text(text: str) -> str:
+    """Normalize body text for simple case-insensitive substring matching."""
+    return " ".join(str(text).casefold().split())
+
+
+def preview_body_text(text: str, limit: int = 160) -> str:
+    """Return a compact single-line preview of message body content."""
+    preview = " ".join(str(text).split())
+    if len(preview) <= limit:
+        return preview
+    return preview[: limit - 3] + "..."
+
+
+def body_rule_exists(
+    rules: list[BodyContainsRuleModel], contains: str, action: str
+) -> bool:
+    """Check whether a normalized body rule is already present."""
+    needle = normalize_body_match_text(contains)
+    return any(
+        normalize_body_match_text(rule.contains) == needle and rule.action == action
+        for rule in rules
+    )
+
+
 def _load_or_init_rules(rule_path):
     """Load rules from file, or prompt to create a starter file if missing."""
     rule_path = Path(rule_path)
@@ -607,6 +773,9 @@ def _load_or_init_rules(rule_path):
             rule_version="1",
             from_domain_auto_delete=[],
             from_address_auto_archive=[],
+            from_address_auto_spam=[],
+            from_address_auto_unsubscribe=[],
+            body_contains=[],
         )
         rule_path.parent.mkdir(parents=True, exist_ok=True)
         rule_path.write_text(json.dumps(rules.model_dump(), indent=2) + "\n")
@@ -640,7 +809,9 @@ def interactive_mode(rule_file_path, query=None):
 
     new_delete_domains: list[str] = []
     new_archive_addresses: list[str] = []
+    new_spam_addresses: list[str] = []
     new_unsubscribe_addresses: list[str] = []
+    new_body_rules: list[BodyContainsRuleModel] = []
     reviewed = 0
 
     for i, msg in enumerate(messages, 1):
@@ -658,6 +829,7 @@ def interactive_mode(rule_file_path, query=None):
         table.add_row("Subject", details["subject"])
         label_names = [label_map.get(lid, lid) for lid in details["labelIds"]]
         table.add_row("Labels", " | ".join(label_names))
+        table.add_row("Body Preview", preview_body_text(details["content"]))
         unsub = details["headers"].get("List-Unsubscribe")
         if unsub:
             table.add_row("Unsubscribe", unsub)
@@ -677,13 +849,15 @@ def interactive_mode(rule_file_path, query=None):
         console.print(
             f"  [bold]d[/bold] Delete domain {domain}  "
             f"[bold]a[/bold] Archive {addr}  "
+            f"[bold]m[/bold] Spam {addr}  "
+            f"[bold]b[/bold] Add body match rule  "
             + ("[bold]u[/bold] Unsubscribe (one-click)  " if unsub_post else "")
             + "[bold]s[/bold] Skip  [bold]q[/bold] Quit"
         )
 
-        choices = ["d", "a", "s", "q"]
+        choices = ["d", "a", "m", "b", "s", "q"]
         if unsub_post and addr:
-            choices.insert(2, "u")
+            choices.insert(4, "u")
         try:
             choice = Prompt.ask(
                 "  Action",
@@ -713,6 +887,15 @@ def interactive_mode(rule_file_path, query=None):
                 console.print(f"  [yellow]+ archive address:[/yellow] {addr}\n")
             else:
                 console.print("  [dim]already in rules[/dim]\n")
+        elif choice == "m" and addr:
+            if (
+                addr not in mail_rules.from_address_auto_spam
+                and addr not in new_spam_addresses
+            ):
+                new_spam_addresses.append(addr)
+                console.print(f"  [magenta]+ spam address:[/magenta] {addr}\n")
+            else:
+                console.print("  [dim]already in rules[/dim]\n")
         elif choice == "u" and addr:
             if (
                 addr not in mail_rules.from_address_auto_unsubscribe
@@ -722,6 +905,41 @@ def interactive_mode(rule_file_path, query=None):
                 console.print(f"  [green]+ auto-unsubscribe:[/green] {addr}\n")
             else:
                 console.print("  [dim]already in rules[/dim]\n")
+        elif choice == "b":
+            try:
+                phrase = Prompt.ask("  Body substring").strip()
+                if not phrase:
+                    console.print("  [dim]empty body substring, skipped[/dim]\n")
+                else:
+                    body_action = Prompt.ask(
+                        "  Body rule action",
+                        choices=["archive", "delete", "spam"]
+                        + (["unsubscribe"] if unsub_post else []),
+                        default="archive",
+                    )
+                    action_map = {
+                        "archive": "ARCHIVE",
+                        "delete": "DELETE",
+                        "spam": "SPAM",
+                        "unsubscribe": "UNSUBSCRIBE",
+                    }
+                    rule_action = action_map[body_action]
+                    already_exists = body_rule_exists(
+                        mail_rules.body_contains, phrase, rule_action
+                    ) or body_rule_exists(new_body_rules, phrase, rule_action)
+                    if already_exists:
+                        console.print("  [dim]already in rules[/dim]\n")
+                    else:
+                        new_body_rules.append(
+                            BodyContainsRuleModel(contains=phrase, action=rule_action)
+                        )
+                        console.print(
+                            f"  [cyan]+ body rule:[/cyan] {rule_action} if body "
+                            f"contains {phrase!r}\n"
+                        )
+            except KeyboardInterrupt:
+                console.print("\n[dim]Interrupted.[/dim]\n")
+                break
         else:
             console.print()
 
@@ -730,7 +948,9 @@ def interactive_mode(rule_file_path, query=None):
     if (
         not new_delete_domains
         and not new_archive_addresses
+        and not new_spam_addresses
         and not new_unsubscribe_addresses
+        and not new_body_rules
     ):
         console.print(
             f"\n[dim]Reviewed {reviewed} messages. No new rules to add.[/dim]\n"
@@ -747,10 +967,18 @@ def interactive_mode(rule_file_path, query=None):
         console.print("[yellow]  Auto-archive addresses:[/yellow]")
         for a in new_archive_addresses:
             console.print(f"    + {a}")
+    if new_spam_addresses:
+        console.print("[magenta]  Auto-spam addresses:[/magenta]")
+        for a in new_spam_addresses:
+            console.print(f"    + {a}")
     if new_unsubscribe_addresses:
         console.print("[green]  Auto-unsubscribe addresses (one-click POST):[/green]")
         for a in new_unsubscribe_addresses:
             console.print(f"    + {a}")
+    if new_body_rules:
+        console.print("[cyan]  Body substring rules:[/cyan]")
+        for rule in new_body_rules:
+            console.print(f"    + {rule.action}: {rule.contains}")
 
     console.print()
     try:
@@ -763,12 +991,16 @@ def interactive_mode(rule_file_path, query=None):
 
     mail_rules.from_domain_auto_delete.extend(new_delete_domains)
     mail_rules.from_address_auto_archive.extend(new_archive_addresses)
+    mail_rules.from_address_auto_spam.extend(new_spam_addresses)
     mail_rules.from_address_auto_unsubscribe.extend(new_unsubscribe_addresses)
+    mail_rules.body_contains.extend(new_body_rules)
     rule_path.write_text(json.dumps(mail_rules.model_dump(), indent=2) + "\n")
     total = (
         len(new_delete_domains)
         + len(new_archive_addresses)
+        + len(new_spam_addresses)
         + len(new_unsubscribe_addresses)
+        + len(new_body_rules)
     )
     console.print(
         f"\n[bold green]✅ Saved {total} new rules to {rule_path}[/bold green]\n"

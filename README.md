@@ -50,12 +50,13 @@ uv run gmail_genie.py run [--rules PATH] [--query QUERY]
 Dependencies are tracked in `pyproject.toml` and `uv.lock`.
 
 Use `--once` to process a single pass and exit instead of polling forever.
-Use `--dry-run` to preview archive, trash, and unsubscribe decisions without
-changing Gmail.
+Use `--dry-run` to preview archive, trash, spam, and unsubscribe decisions
+without changing Gmail.
 
 For Cloud Run, `gcloud-scheduled-jobs/.env.local` also supports optional
 `NTFY_BASE_URL` and `NTFY_TOPIC` settings. When configured, the job only sends
-an `ntfy` push if it actually archives, deletes, or unsubscribes something.
+an `ntfy` push if it actually archives, deletes, marks spam, or unsubscribes
+something.
 
 Run the container locally with your existing Gmail config mounted in:
 
@@ -105,8 +106,17 @@ The current rules file is a single JSON object:
   "from_address_auto_archive": [
     "receipts@example.com"
   ],
+  "from_address_auto_spam": [
+    "sales@example.com"
+  ],
   "from_address_auto_unsubscribe": [
     "newsletter@example.com"
+  ],
+  "body_contains": [
+    {
+      "contains": "your application has been accepted",
+      "action": "ARCHIVE"
+    }
   ]
 }
 ```
@@ -116,9 +126,14 @@ The current rules file is a single JSON object:
   header, case-insensitively.
 - `from_address_auto_archive` matches the full sender email address parsed from
   the `From` header, case-insensitively.
+- `from_address_auto_spam` matches the full sender email address parsed from
+  the `From` header, case-insensitively.
 - `from_address_auto_unsubscribe` matches the full sender email address,
   case-insensitively, but only when the message includes the
   `List-Unsubscribe-Post` header required for one-click unsubscribe.
+- `body_contains` is an ordered list of naive substring rules. Each rule checks
+  whether the decoded message body contains `contains`, case-insensitively, and
+  if it does, returns the configured `action`.
 
 ### Evaluation Order
 
@@ -126,19 +141,23 @@ The rules engine uses a fixed first-match order:
 
 1. Domain delete
 2. Exact-address archive
-3. Exact-address one-click unsubscribe
-4. No-op
+3. Exact-address spam
+4. Exact-address one-click unsubscribe
+5. Ordered body substring rules
+6. No-op
 
 That order matters. A sender domain in `from_domain_auto_delete` overrides the
 address-based rules for the same message. Likewise, an address in
 `from_address_auto_archive` wins before `from_address_auto_unsubscribe` is
-considered.
+considered, and `from_address_auto_spam` wins before unsubscribe. Body rules
+only run if no sender-based rule matched first.
 
 ### Action Semantics
 
 - `DELETE` currently calls Gmail's trash API. Messages are moved to Trash, not
   permanently deleted.
 - `ARCHIVE` removes the `INBOX` and `UNREAD` labels from the message.
+- `SPAM` uses Gmail's `SPAM` system label and removes the `INBOX` label.
 - `UNSUBSCRIBE` extracts the first HTTPS URL from the `List-Unsubscribe`
   header, sends an RFC 8058 style POST with
   `List-Unsubscribe=One-Click`, and then archives the message if the POST
@@ -147,6 +166,14 @@ considered.
 
 If the unsubscribe headers are incomplete or the POST fails, Gmail Genie does
 not fall back to another action for that message during the same run.
+
+When an action succeeds, Gmail Genie also attempts to add a user label in the
+form `genie/<action>`, such as `genie/delete` or `genie/spam`.
+
+Body matching is intentionally naive. Gmail Genie performs a normalized,
+case-insensitive substring check against the decoded message body text it
+extracts from the message payload, preferring `text/plain` parts when they are
+available.
 
 ### Message Selection
 
@@ -161,14 +188,16 @@ you add:
 
 - a delete-by-domain rule
 - an archive-by-address rule
+- a spam-by-address rule
 - an unsubscribe-by-address rule when the message advertises one-click support
+- a body substring rule with an explicit action
 
 New rules are only written after you confirm the proposed changes.
 
 ## Features
 
 - Gmail automation with rules-based filtering
-- Actions: archive, move to trash, one-click unsubscribe, or no-op based on sender rules
+- Actions: archive, move to trash, mark spam, one-click unsubscribe, or no-op based on sender rules
 - Interval-based polling for new messages
 - Formatted console output with Rich
 

@@ -44,10 +44,10 @@
 
 ## Live Gmail Safety
 
-- Anything beyond `--help` uses a real Gmail account. `run` can archive or
-  trash messages immediately based on the active rules.
+- Anything beyond `--help` uses a real Gmail account. `run` can archive,
+  trash, or mark messages as spam immediately based on the active rules.
 - `run --dry-run` still reads the live mailbox and authenticates, but it does
-  not archive or trash messages.
+  not archive, trash, or mark spam messages.
 - `interactive` reads live mail and updates the rules JSON only after
   confirmation; it does not modify mailbox contents.
 - `self-test` is a live integration test, not a unit test. It creates and
@@ -69,8 +69,8 @@
   avoid changing the app's auth/config code.
 - `gcloud-scheduled-jobs/.env.local` optionally supports `NTFY_BASE_URL` and
   `NTFY_TOPIC` for push notifications. The app only notifies when a non-dry-run
-  pass actually archives, deletes, or unsubscribes messages, plus fatal
-  failures.
+  pass actually archives, deletes, marks spam, or unsubscribes messages, plus
+  fatal failures.
 - Those mounted secret files are read-only. `authenticate()` now tolerates a
   read-only `token.pickle` by refreshing in memory and continuing without
   persisting the refreshed token.
@@ -78,11 +78,15 @@
   which prompts to create a starter JSON. A tracked example config now lives at
   `rules.example.json`.
 - The current rule schema is `rule_version`, `from_domain_auto_delete`,
-  `from_address_auto_archive`, and `from_address_auto_unsubscribe` (RFC 8058
-  one-click POST). If rule behavior changes, update `MailRuleModel`,
+  `from_address_auto_archive`, `from_address_auto_spam`,
+  `from_address_auto_unsubscribe`, and `body_contains`. `body_contains` is an
+  ordered list of `{contains, action}` rules for naive case-insensitive body
+  substring matching. Successful actions are also labeled with a user label in
+  the form `genie/<action>`. If rule behavior changes, update `MailRuleModel`,
   interactive rule building, and starter-file creation together.
 - Rule evaluation order is fixed: delete-by-domain, then archive-by-address,
-  then one-click unsubscribe-by-address, then no-op.
+  then spam-by-address, then one-click unsubscribe-by-address, then ordered
+  body substring rules, then no-op.
 
 ## Gotchas
 
