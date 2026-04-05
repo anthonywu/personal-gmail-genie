@@ -14,6 +14,7 @@ import email.mime.text
 import email.utils
 import functools
 import itertools
+import re
 import json
 import time
 import pickle
@@ -22,6 +23,7 @@ from pathlib import Path
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+import httpx
 from pydantic import BaseModel
 from rich.console import Console
 from rich.table import Table
@@ -41,13 +43,14 @@ LOG_DIR = (
 
 # Define a model with Literal fields
 class ActionModel(BaseModel):
-    action: Literal["ARCHIVE", "DELETE", "NO_OP"]
+    action: Literal["ARCHIVE", "DELETE", "UNSUBSCRIBE", "NO_OP"]
 
 
 class MailRuleModel(BaseModel):
     rule_version: str
     from_domain_auto_delete: list[str]
     from_address_auto_archive: list[str]
+    from_address_auto_unsubscribe: list[str] = []
 
     def process_message(self, message_dict) -> ActionModel:
         addr, domain = extract_email_and_domain(message_dict["from"])
@@ -57,6 +60,13 @@ class MailRuleModel(BaseModel):
         for domain_a in self.from_address_auto_archive:
             if domain_a.strip().lower() == addr:
                 return ActionModel(action="ARCHIVE")
+        headers = message_dict.get("headers", {})
+        has_one_click = (
+            "List-Unsubscribe-Post" in headers or "list-unsubscribe-post" in headers
+        )
+        for addr_u in self.from_address_auto_unsubscribe:
+            if addr_u.strip().lower() == addr and has_one_click:
+                return ActionModel(action="UNSUBSCRIBE")
         return ActionModel(action="NO_OP")
 
 
@@ -253,7 +263,14 @@ def get_profile(service, user_id="me"):
 def get_message_metadata(service, msg_id, user_id="me", metadata_headers=None):
     """Get message metadata (headers only, no body) for faster rule matching."""
     if metadata_headers is None:
-        metadata_headers = ["From", "To", "Subject", "Date", "List-Unsubscribe"]
+        metadata_headers = [
+            "From",
+            "To",
+            "Subject",
+            "Date",
+            "List-Unsubscribe",
+            "List-Unsubscribe-Post",
+        ]
     message = (
         service.users()
         .messages()
@@ -388,6 +405,22 @@ def get_unsubscribe_info(service, msg_id, user_id="me"):
     return meta["headers"].get("list-unsubscribe")
 
 
+def extract_one_click_unsubscribe_url(list_unsubscribe_header: str) -> str | None:
+    """Extract the HTTPS URL from a List-Unsubscribe header for one-click unsub."""
+    for match in re.finditer(r"<(https://[^>]+)>", list_unsubscribe_header):
+        return match.group(1)
+    return None
+
+
+def post_one_click_unsubscribe(url: str) -> bool:
+    """POST to a one-click unsubscribe URL per RFC 8058."""
+    try:
+        resp = httpx.post(url, content="List-Unsubscribe=One-Click", timeout=10)
+        return 200 <= resp.status_code < 300
+    except httpx.HTTPError:
+        return False
+
+
 def main(rule_file_path, interval_seconds=600, run_once=False, **process_kwargs):
     console = Console()
     try:
@@ -467,6 +500,26 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
                     table.add_row("Action Applied", f"📦: {action}")
                 else:
                     table.add_row("Action Applied", f"❌: {action}")
+            elif action == "UNSUBSCRIBE":
+                unsub_header = msg_details["headers"].get(
+                    "List-Unsubscribe",
+                    msg_details["headers"].get("list-unsubscribe", ""),
+                )
+                unsub_url = extract_one_click_unsubscribe_url(unsub_header)
+                if dry_run:
+                    table.add_row("Action Preview", f"🧪: {action}")
+                    if unsub_url:
+                        table.add_row("Unsubscribe URL", unsub_url)
+                elif unsub_url:
+                    if post_one_click_unsubscribe(unsub_url):
+                        table.add_row("Action Applied", f"✅: {action}")
+                        archive_emails(service, [msg_details["id"]])
+                    else:
+                        table.add_row("Action Applied", f"❌: {action} (POST failed)")
+                else:
+                    table.add_row(
+                        "Action Applied", f"❌: {action} (no HTTPS unsub URL)"
+                    )
             else:
                 table.add_row("Action Recommended", f"💡: {action}")
                 if content_preview_length > 0:
@@ -535,6 +588,7 @@ def interactive_mode(rule_file_path, query=None):
 
     new_delete_domains: list[str] = []
     new_archive_addresses: list[str] = []
+    new_unsubscribe_addresses: list[str] = []
     reviewed = 0
 
     for i, msg in enumerate(messages, 1):
@@ -545,7 +599,6 @@ def interactive_mode(rule_file_path, query=None):
         addr, domain = extract_email_and_domain(details["from"])
         existing_action = mail_rules.process_message(details)
 
-        # display message
         table = Table(show_header=False, box=None)
         table.add_column(style="bold")
         table.add_column()
@@ -556,6 +609,9 @@ def interactive_mode(rule_file_path, query=None):
         unsub = details["headers"].get("List-Unsubscribe")
         if unsub:
             table.add_row("Unsubscribe", unsub)
+        unsub_post = details["headers"].get("List-Unsubscribe-Post")
+        if unsub_post:
+            table.add_row("One-Click", unsub_post)
         if existing_action.action != "NO_OP":
             table.add_row("Existing Rule", f"[dim]{existing_action.action}[/dim]")
 
@@ -566,11 +622,25 @@ def interactive_mode(rule_file_path, query=None):
         )
         console.print(panel)
 
-        choice = Prompt.ask(
-            "  Action",
-            choices=["d", "a", "s", "q"],
-            default="s",
+        console.print(
+            f"  [bold]d[/bold] Delete domain {domain}  "
+            f"[bold]a[/bold] Archive {addr}  "
+            + ("[bold]u[/bold] Unsubscribe (one-click)  " if unsub_post else "")
+            + "[bold]s[/bold] Skip  [bold]q[/bold] Quit"
         )
+
+        choices = ["d", "a", "s", "q"]
+        if unsub_post and addr:
+            choices.insert(2, "u")
+        try:
+            choice = Prompt.ask(
+                "  Action",
+                choices=choices,
+                default="s",
+            )
+        except KeyboardInterrupt:
+            console.print("\n[dim]Interrupted.[/dim]\n")
+            break
         if choice == "q":
             break
         elif choice == "d" and domain:
@@ -591,13 +661,25 @@ def interactive_mode(rule_file_path, query=None):
                 console.print(f"  [yellow]+ archive address:[/yellow] {addr}\n")
             else:
                 console.print("  [dim]already in rules[/dim]\n")
+        elif choice == "u" and addr:
+            if (
+                addr not in mail_rules.from_address_auto_unsubscribe
+                and addr not in new_unsubscribe_addresses
+            ):
+                new_unsubscribe_addresses.append(addr)
+                console.print(f"  [green]+ auto-unsubscribe:[/green] {addr}\n")
+            else:
+                console.print("  [dim]already in rules[/dim]\n")
         else:
             console.print()
 
         reviewed += 1
 
-    # summary
-    if not new_delete_domains and not new_archive_addresses:
+    if (
+        not new_delete_domains
+        and not new_archive_addresses
+        and not new_unsubscribe_addresses
+    ):
         console.print(
             f"\n[dim]Reviewed {reviewed} messages. No new rules to add.[/dim]\n"
         )
@@ -613,17 +695,31 @@ def interactive_mode(rule_file_path, query=None):
         console.print("[yellow]  Auto-archive addresses:[/yellow]")
         for a in new_archive_addresses:
             console.print(f"    + {a}")
+    if new_unsubscribe_addresses:
+        console.print("[green]  Auto-unsubscribe addresses (one-click POST):[/green]")
+        for a in new_unsubscribe_addresses:
+            console.print(f"    + {a}")
 
     console.print()
-    if not Confirm.ask("Save these rules?", default=True):
-        console.print("[dim]Discarded.[/dim]\n")
+    try:
+        if not Confirm.ask("Save these rules?", default=True):
+            console.print("[dim]Discarded.[/dim]\n")
+            return
+    except KeyboardInterrupt:
+        console.print("\n[dim]Discarded.[/dim]\n")
         return
 
     mail_rules.from_domain_auto_delete.extend(new_delete_domains)
     mail_rules.from_address_auto_archive.extend(new_archive_addresses)
+    mail_rules.from_address_auto_unsubscribe.extend(new_unsubscribe_addresses)
     rule_path.write_text(json.dumps(mail_rules.model_dump(), indent=2) + "\n")
+    total = (
+        len(new_delete_domains)
+        + len(new_archive_addresses)
+        + len(new_unsubscribe_addresses)
+    )
     console.print(
-        f"\n[bold green]✅ Saved {len(new_delete_domains) + len(new_archive_addresses)} new rules to {rule_path}[/bold green]\n"
+        f"\n[bold green]✅ Saved {total} new rules to {rule_path}[/bold green]\n"
     )
 
 

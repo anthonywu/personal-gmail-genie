@@ -49,10 +49,10 @@
 - Missing rules files are bootstrapped at runtime by `_load_or_init_rules()`,
   which prompts to create a starter JSON. The README mentions
   `rules_examples.json`, but that file is not present in this repo.
-- The current rule schema is only `rule_version`,
-  `from_domain_auto_delete`, and `from_address_auto_archive`. If rule
-  behavior changes, update `MailRuleModel`, interactive rule building, and
-  starter-file creation together.
+- The current rule schema is `rule_version`, `from_domain_auto_delete`,
+  `from_address_auto_archive`, and `from_address_auto_unsubscribe` (RFC 8058
+  one-click POST). If rule behavior changes, update `MailRuleModel`,
+  interactive rule building, and starter-file creation together.
 
 ## Gotchas
 
