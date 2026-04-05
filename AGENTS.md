@@ -15,9 +15,11 @@
   `uv run gmail_genie.py` still works because the script falls back to `run`
   when no subcommand is provided.
 - One-shot processing: `uv run gmail_genie.py run --once`.
+- Safe preview: `uv run gmail_genie.py run --dry-run --once`.
 - Lint: `just lint`. Today that only runs `ruff check gmail_genie.py` and
   `ruff format gmail_genie.py`.
-- LaunchAgent management: `./gmail_genie_launcher.sh {install|start|stop|restart|status|logs|tail}`.
+- LaunchAgent management:
+  `./gmail_genie_launcher.sh {install|start|stop|restart|status|logs|tail|uninstall}`.
 - For routine non-destructive verification, use CLI help plus lint:
   `uv run gmail_genie.py --help`, `uv run gmail_genie.py run --help`,
   `uv run gmail_genie.py interactive --help`, `just lint`.
@@ -26,6 +28,8 @@
 
 - Anything beyond `--help` uses a real Gmail account. `run` can archive or
   trash messages immediately based on the active rules.
+- `run --dry-run` still reads the live mailbox and authenticates, but it does
+  not archive or trash messages.
 - `interactive` reads live mail and updates the rules JSON only after
   confirmation; it does not modify mailbox contents.
 - `self-test` is a live integration test, not a unit test. It creates and
