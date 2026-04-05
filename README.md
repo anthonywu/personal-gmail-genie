@@ -48,6 +48,12 @@ Dependencies are tracked in `pyproject.toml` and `uv.lock`.
 Use `--once` to process a single pass and exit instead of polling forever.
 Use `--dry-run` to preview archive/delete decisions without changing Gmail.
 
+Run the container locally with your existing Gmail config mounted in:
+
+```bash
+just --justfile gcloud-scheduled-jobs/justfile run-local
+```
+
 ### Launch Agent (macOS)
 
 For automatic startup and management:

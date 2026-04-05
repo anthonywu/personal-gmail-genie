@@ -25,9 +25,12 @@
 - One-shot processing: `uv run gmail_genie.py run --once`.
 - Safe preview: `uv run gmail_genie.py run --dry-run --once`.
 - Lockfile refresh: `uv lock`.
-- Lint: `just lint`. Today that only runs `ruff check gmail_genie.py` and
+- Lint: `just lint`. Today that runs `shellcheck` on tracked shell files,
+  `just --unstable --fmt --check`, `ruff check gmail_genie.py`, and
   `ruff format gmail_genie.py`.
 - Cloud ops: `just --justfile gcloud-scheduled-jobs/justfile provision`.
+- Cloud ops local build: `just --justfile gcloud-scheduled-jobs/justfile build`.
+- Cloud ops local run: `just --justfile gcloud-scheduled-jobs/justfile run-local`.
 - Cloud ops logs: `just --justfile gcloud-scheduled-jobs/justfile logs`.
 - Shell lint for the Cloud ops scripts:
   `shellcheck -x -P gcloud-scheduled-jobs/scripts gcloud-scheduled-jobs/scripts/*.sh`.
@@ -62,6 +65,9 @@
 - The Cloud Run Job scaffold mounts Secret Manager secrets back onto those same
   config file paths inside the container under `/root/.config/gmail-genie/` to
   avoid changing the app's auth/config code.
+- Those mounted secret files are read-only. `authenticate()` now tolerates a
+  read-only `token.pickle` by refreshing in memory and continuing without
+  persisting the refreshed token.
 - Missing rules files are bootstrapped at runtime by `_load_or_init_rules()`,
   which prompts to create a starter JSON. The README mentions
   `rules_examples.json`, but that file is not present in this repo.

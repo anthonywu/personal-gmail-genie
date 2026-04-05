@@ -1,0 +1,51 @@
+set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+
+local_image := "gmail-genie-local"
+
+default:
+    @just --list
+
+provision: enable-apis create-service-accounts create-artifact-registry create-secrets sync-secrets build-and-push deploy-job create-scheduler-job
+
+build:
+    docker build -t {{ local_image }} {{ justfile_directory() }}/..
+
+run-local: build
+    [[ -f "$HOME/.config/gmail-genie/credentials.json" ]]
+    [[ -f "$HOME/.config/gmail-genie/token.pickle" ]]
+    [[ -f "$HOME/.config/gmail-genie/rules.json" ]]
+    docker run --rm \
+      -v "$HOME/.config/gmail-genie/credentials.json:/root/.config/gmail-genie/credentials.json:ro" \
+      -v "$HOME/.config/gmail-genie/token.pickle:/root/.config/gmail-genie/token.pickle:ro" \
+      -v "$HOME/.config/gmail-genie/rules.json:/root/.config/gmail-genie/rules.json:ro" \
+      {{ local_image }} run --dry-run --once
+
+enable-apis:
+    ./scripts/10-enable-apis.sh
+
+create-service-accounts:
+    ./scripts/20-create-service-accounts.sh
+
+create-artifact-registry:
+    ./scripts/30-create-artifact-registry.sh
+
+create-secrets:
+    ./scripts/40-create-secrets.sh
+
+sync-secrets:
+    ./scripts/50-sync-local-secrets.sh
+
+build-and-push:
+    ./scripts/60-build-and-push-image.sh
+
+deploy-job:
+    ./scripts/70-deploy-job.sh
+
+create-scheduler-job:
+    ./scripts/80-create-scheduler-job.sh
+
+run-now:
+    ./scripts/90-run-job-now.sh
+
+logs:
+    ./scripts/95-tail-logs.sh

@@ -1,15 +1,5 @@
-# /// script
-# requires-python = ">=3.13"
-# dependencies = [
-#     "google-api-python-client==2.193.0",
-#     "google-auth-oauthlib==1.3.1",
-#     "httpx==0.28.1",
-#     "pydantic==2.12.5",
-#     "rich==14.3.3",
-# ]
-# ///
-
 import base64
+import errno
 import email.mime.text
 import email.utils
 import functools
@@ -105,8 +95,17 @@ def authenticate():
             creds = flow.run_local_server(port=0)
 
         # Save credentials for future use
-        with AUTH_TOKEN_FILE.open("wb") as token:
-            pickle.dump(creds, token)
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            with AUTH_TOKEN_FILE.open("wb") as token:
+                pickle.dump(creds, token)
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EROFS}:
+                raise
+            print(
+                f"Warning: could not write OAuth token to {AUTH_TOKEN_FILE}; "
+                "continuing with in-memory credentials for this run."
+            )
 
     return build("gmail", "v1", credentials=creds)
 

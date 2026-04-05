@@ -1,4 +1,5 @@
 .env.*
+!gcloud-scheduled-jobs/.env.local.example
 
 *.pickle
 credentials.json
@@ -6,5 +7,6 @@ token.json
 
 __pycache__/
 .ruff_cache/
+.venv/
 
 .plan/
