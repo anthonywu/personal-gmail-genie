@@ -1,6 +1,8 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 local_image := "gmail-genie-local"
+local_env_file := justfile_directory() + "/.env.local"
+local_env_keys_file := justfile_directory() + "/.env.keys"
 
 default:
     @just --list
@@ -13,17 +15,38 @@ build:
 _run-docker cmd tty="" entrypoint="./start.sh":
     #!/usr/bin/env bash
     set -euo pipefail
+    env_file="{{ local_env_file }}"
+    env_keys_file="{{ local_env_keys_file }}"
+    temp_env_file=""
+    if [[ -f "$env_file" ]]; then
+        set -a
+        if grep -q 'encrypted:' "$env_file"; then
+            command -v dotenvx >/dev/null 2>&1 || { echo "dotenvx is required to load encrypted env file: $env_file" >&2; exit 1; }
+            [[ -f "$env_keys_file" ]] || { echo "Missing dotenvx keys file for encrypted env file: $env_keys_file" >&2; exit 1; }
+            temp_env_file="$(mktemp)"
+            dotenvx decrypt -f "$env_file" -fk "$env_keys_file" --stdout > "$temp_env_file"
+            # shellcheck disable=SC1090
+            source "$temp_env_file"
+        else
+            # shellcheck disable=SC1090
+            source "$env_file"
+        fi
+        set +a
+    fi
     [[ -f "$HOME/.config/gmail-genie/credentials.json" ]]
     [[ -f "$HOME/.config/gmail-genie/token.pickle" ]]
     [[ -f "$HOME/.config/gmail-genie/rules.json" ]]
     tmp_authkey=""
     authkey_mount=()
-    cleanup() { [[ -n "$tmp_authkey" ]] && rm -f "$tmp_authkey"; }
+    env_args=()
+    cleanup() { [[ -n "$tmp_authkey" ]] && rm -f "$tmp_authkey"; [[ -n "$temp_env_file" ]] && rm -f "$temp_env_file"; }
     trap cleanup EXIT
     if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then tmp_authkey="$(mktemp)"; printf '%s' "$TAILSCALE_AUTHKEY" > "$tmp_authkey"; authkey_mount=(-v "$tmp_authkey:/var/run/secrets/tailscale/authkey:ro"); fi
+    while IFS= read -r env_name; do env_args+=(-e "$env_name=${!env_name}"); done < <(compgen -A variable | grep -E '^TAILNET_.*_(HOSTNAME|IP)$' || true)
     docker run --rm {{ tty }} \
     --entrypoint "{{ entrypoint }}" \
-    "${authkey_mount[@]}" \
+    ${authkey_mount[@]+"${authkey_mount[@]}"} \
+    ${env_args[@]+"${env_args[@]}"} \
     -v "$HOME/.config/gmail-genie/credentials.json:/root/.config/gmail-genie/credentials.json:ro" \
     -v "$HOME/.config/gmail-genie/token.pickle:/root/.config/gmail-genie/token.pickle:ro" \
     -v "$HOME/.config/gmail-genie/rules.json:/root/.config/gmail-genie/rules.json:ro" \

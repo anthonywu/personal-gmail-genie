@@ -13,6 +13,18 @@ log() {
   printf '[gcloud-scheduled-jobs] %s\n' "$*"
 }
 
+append_job_env_var() {
+  local name="$1"
+  local value="${2:-}"
+
+  [[ -n "$value" ]] || return 0
+
+  if [[ -n "${JOB_ENV_VARS:-}" ]]; then
+    JOB_ENV_VARS+=","
+  fi
+  JOB_ENV_VARS+="${name}=${value}"
+}
+
 die() {
   printf '[gcloud-scheduled-jobs] ERROR: %s\n' "$*" >&2
   exit 1
@@ -20,6 +32,30 @@ die() {
 
 require_file() {
   [[ -f "$1" ]] || die "Required file not found: $1"
+}
+
+source_env_file() {
+  local env_file="$1"
+  local env_dir env_keys_file
+  local temp_env_file=""
+
+  env_dir="$(cd -- "$(dirname -- "$env_file")" && pwd)"
+  env_keys_file="${env_dir}/.env.keys"
+
+  set -a
+  if grep -q 'encrypted:' "$env_file"; then
+    command -v dotenvx >/dev/null 2>&1 || die "dotenvx is required to load encrypted env file: $env_file"
+    [[ -f "$env_keys_file" ]] || die "Missing dotenvx keys file for encrypted env file: $env_keys_file"
+    temp_env_file="$(mktemp)"
+    dotenvx decrypt -f "$env_file" -fk "$env_keys_file" --stdout >"$temp_env_file"
+    # shellcheck disable=SC1090
+    source "$temp_env_file"
+  else
+    # shellcheck disable=SC1090
+    source "$env_file"
+  fi
+  set +a
+  [[ -n "$temp_env_file" ]] && rm -f "$temp_env_file"
 }
 
 load_env() {
@@ -31,11 +67,7 @@ load_env() {
   else
     [[ -f "$env_file" ]] || die "Missing env file: $env_file"
     LOADED_ENV_FILE="$env_file"
-
-    set -a
-    # shellcheck disable=SC1090
-    source "$env_file"
-    set +a
+    source_env_file "$env_file"
   fi
 
   resolve_gcloud_bin
@@ -46,16 +78,22 @@ load_env() {
 
 resolve_gcloud_bin() {
   if [[ -n "${GCLOUD_BIN:-}" ]]; then
-    :
-  elif [[ -x "/Users/anthonywu/google-cloud-sdk/bin/gcloud" ]]; then
-    GCLOUD_BIN="/Users/anthonywu/google-cloud-sdk/bin/gcloud"
+    if [[ "$GCLOUD_BIN" == */* ]]; then
+      [[ -x "$GCLOUD_BIN" ]] || die "gcloud binary is not executable: $GCLOUD_BIN"
+    elif command -v "$GCLOUD_BIN" >/dev/null 2>&1; then
+      GCLOUD_BIN="$(command -v "$GCLOUD_BIN")"
+    else
+      die "gcloud command not found on PATH: $GCLOUD_BIN"
+    fi
   elif command -v gcloud >/dev/null 2>&1; then
     GCLOUD_BIN="$(command -v gcloud)"
+  elif [[ -x "${HOME}/google-cloud-sdk/bin/gcloud" ]]; then
+    GCLOUD_BIN="${HOME}/google-cloud-sdk/bin/gcloud"
   else
     die "gcloud not found; set GCLOUD_BIN in ${DEFAULT_ENV_FILE}"
   fi
 
-  [[ -x "$GCLOUD_BIN" ]] || die "gcloud binary is not executable: $GCLOUD_BIN"
+  export GCLOUD_BIN
 }
 
 derive_project_id() {
@@ -79,8 +117,12 @@ derive_defaults() {
   NTFY_BASE_URL="${NTFY_BASE_URL:-https://ntfy.sh}"
   JOB_ENV_VARS=""
   if [[ -n "${NTFY_TOPIC:-}" ]]; then
-    JOB_ENV_VARS="NTFY_BASE_URL=${NTFY_BASE_URL},NTFY_TOPIC=${NTFY_TOPIC}"
+    append_job_env_var "NTFY_BASE_URL" "$NTFY_BASE_URL"
+    append_job_env_var "NTFY_TOPIC" "$NTFY_TOPIC"
   fi
+  while IFS= read -r env_var_name; do
+    append_job_env_var "$env_var_name" "${!env_var_name}"
+  done < <(compgen -A variable | grep -E '^TAILNET_.*_(HOSTNAME|IP)$' || true)
 
   export RUNTIME_SERVICE_ACCOUNT_EMAIL SCHEDULER_SERVICE_ACCOUNT_EMAIL IMAGE_URI JOB_RUN_URI SECRET_MOUNTS STARTUP_COMMAND NTFY_BASE_URL JOB_ENV_VARS
 }

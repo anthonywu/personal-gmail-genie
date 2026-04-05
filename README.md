@@ -2,7 +2,6 @@
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-%3E%3D3.13-blue.svg)](https://www.python.org/downloads/)
-[![GitHub last commit](https://img.shields.io/github/last-commit/anthonywu/personal-gmail-genie)](https://github.com/anthonywu/personal-gmail-genie)
 
 A Gmail assistant that automates email management based on user-defined
 rules.
@@ -59,12 +58,20 @@ For Cloud Run, `gcloud-scheduled-jobs/.env.local` also supports optional
 `NTFY_BASE_URL` and `NTFY_TOPIC` settings. When configured, the job only sends
 an `ntfy` push if it actually archives, deletes, marks spam, or unsubscribes
 something.
+When Tailscale is enabled, you can also set `TAILNET_*_HOSTNAME` values such as
+`TAILNET_LLM_API_HOSTNAME=dgx`; `start.sh` resolves them from
+`tailscale status --json --peers` at runtime and exports the corresponding
+`TAILNET_*_IP` variables for the job.
 
 Run the container locally with your existing Gmail config mounted in:
 
 ```bash
 just --justfile gcloud-scheduled-jobs/justfile run-local
 ```
+
+The local harness sources `gcloud-scheduled-jobs/.env.local` before it starts
+the container, so `TAILSCALE_AUTHKEY` and any `TAILNET_*_HOSTNAME` /
+`TAILNET_*_IP` values there are available during `just run-local`.
 
 ### Launch Agent (macOS)
 

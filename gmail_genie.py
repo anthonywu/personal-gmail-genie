@@ -960,66 +960,64 @@ def process(
     label_name_to_id = get_label_name_to_id_map(service)
     for action, group in itertools.groupby(messages_actions, key=lambda x: x[1].action):
         for msg_details, decision in group:
-            # Create a table with two columns
-            table = Table(show_header=False, box=None)
-            table.add_column()
-            table.add_column()
-            table.add_row("Message ID", msg_details["id"])
+            message_id = msg_details["id"]
             label_names = [label_map.get(_, _) for _ in msg_details["labelIds"]]
-            table.add_row("Labels", " | ".join(label_names))
-            table.add_row("From", msg_details["from"])
-            table.add_row("Subject", msg_details["subject"])
-            table.add_row("Decision Source", decision.source)
+            rows: list[tuple[str, object]] = [
+                ("Message ID", message_id),
+                ("Labels", label_names),
+                ("From", msg_details["from"]),
+                ("Subject", msg_details["subject"]),
+                ("Decision Source", decision.source),
+            ]
             if decision.confidence is not None:
-                table.add_row("Decision Confidence", f"{decision.confidence:.2f}")
+                rows.append(("Decision Confidence", f"{decision.confidence:.2f}"))
             if decision.reason:
-                table.add_row("Decision Reason", decision.reason)
-            # breakpoint()
+                rows.append(("Decision Reason", decision.reason))
             if action == "DELETE":
                 if dry_run:
-                    table.add_row("Action Preview", f"🧪: {action}")
-                    table.add_row(
-                        "Genie Label Preview", genie_action_label_name(action)
+                    rows.append(("Action Preview", action))
+                    rows.append(
+                        ("Genie Label Preview", genie_action_label_name(action))
                     )
-                elif delete_message(service, msg_details["id"]):
+                elif delete_message(service, message_id):
                     summary["deleted"] += 1
-                    table.add_row("Action Applied", f"✅: {action}")
+                    rows.append(("Action Applied", action))
                     if apply_genie_action_label(
-                        service, msg_details["id"], action, label_name_to_id
+                        service, message_id, action, label_name_to_id
                     ):
-                        table.add_row("Genie Label", genie_action_label_name(action))
+                        rows.append(("Genie Label", genie_action_label_name(action)))
                 else:
-                    table.add_row("Action Applied", f"❌: {action}")
+                    rows.append(("Action Applied", f"{action} (failed)"))
             elif action == "ARCHIVE":
                 if dry_run:
-                    table.add_row("Action Preview", f"🧪: {action}")
-                    table.add_row(
-                        "Genie Label Preview", genie_action_label_name(action)
+                    rows.append(("Action Preview", action))
+                    rows.append(
+                        ("Genie Label Preview", genie_action_label_name(action))
                     )
-                elif archive_emails(service, [msg_details["id"]]):
+                elif archive_emails(service, [message_id]):
                     summary["archived"] += 1
-                    table.add_row("Action Applied", f"📦: {action}")
+                    rows.append(("Action Applied", action))
                     if apply_genie_action_label(
-                        service, msg_details["id"], action, label_name_to_id
+                        service, message_id, action, label_name_to_id
                     ):
-                        table.add_row("Genie Label", genie_action_label_name(action))
+                        rows.append(("Genie Label", genie_action_label_name(action)))
                 else:
-                    table.add_row("Action Applied", f"❌: {action}")
+                    rows.append(("Action Applied", f"{action} (failed)"))
             elif action == "SPAM":
                 if dry_run:
-                    table.add_row("Action Preview", f"🧪: {action}")
-                    table.add_row(
-                        "Genie Label Preview", genie_action_label_name(action)
+                    rows.append(("Action Preview", action))
+                    rows.append(
+                        ("Genie Label Preview", genie_action_label_name(action))
                     )
-                elif mark_message_as_spam(service, msg_details["id"]):
+                elif mark_message_as_spam(service, message_id):
                     summary["spammed"] += 1
-                    table.add_row("Action Applied", f"🚫: {action}")
+                    rows.append(("Action Applied", action))
                     if apply_genie_action_label(
-                        service, msg_details["id"], action, label_name_to_id
+                        service, message_id, action, label_name_to_id
                     ):
-                        table.add_row("Genie Label", genie_action_label_name(action))
+                        rows.append(("Genie Label", genie_action_label_name(action)))
                 else:
-                    table.add_row("Action Applied", f"❌: {action}")
+                    rows.append(("Action Applied", f"{action} (failed)"))
             elif action == "UNSUBSCRIBE":
                 unsub_header = msg_details["headers"].get(
                     "List-Unsubscribe",
@@ -1027,42 +1025,37 @@ def process(
                 )
                 unsub_url = extract_one_click_unsubscribe_url(unsub_header)
                 if dry_run:
-                    table.add_row("Action Preview", f"🧪: {action}")
-                    table.add_row(
-                        "Genie Label Preview", genie_action_label_name(action)
+                    rows.append(("Action Preview", action))
+                    rows.append(
+                        ("Genie Label Preview", genie_action_label_name(action))
                     )
                     if unsub_url:
-                        table.add_row("Unsubscribe URL", unsub_url)
+                        rows.append(("Unsubscribe URL", unsub_url))
                 elif unsub_url:
                     if post_one_click_unsubscribe(unsub_url):
                         summary["unsubscribed"] += 1
-                        table.add_row("Action Applied", f"✅: {action}")
-                        archive_emails(service, [msg_details["id"]])
+                        rows.append(("Action Applied", action))
+                        archive_emails(service, [message_id])
                         if apply_genie_action_label(
-                            service, msg_details["id"], action, label_name_to_id
+                            service, message_id, action, label_name_to_id
                         ):
-                            table.add_row(
-                                "Genie Label", genie_action_label_name(action)
+                            rows.append(
+                                ("Genie Label", genie_action_label_name(action))
                             )
                     else:
-                        table.add_row("Action Applied", f"❌: {action} (POST failed)")
+                        rows.append(("Action Applied", f"{action} (POST failed)"))
                 else:
-                    table.add_row(
-                        "Action Applied", f"❌: {action} (no HTTPS unsub URL)"
-                    )
+                    rows.append(("Action Applied", f"{action} (no HTTPS unsub URL)"))
             else:
-                table.add_row("Action Recommended", f"💡: {action}")
+                rows.append(("Action Recommended", action))
                 if content_preview_length > 0:
-                    table.add_row(
-                        "Content Preview",
-                        msg_details["content"][:content_preview_length],
+                    rows.append(
+                        (
+                            "Content Preview",
+                            msg_details["content"][:content_preview_length],
+                        )
                     )
-
-            # Create a panel to contain the table
-            message_panel = Panel(
-                table, title=msg_details["subject"][:80], expand=False
-            )
-            console.print(message_panel)
+            print_message_decision(console, msg_details["subject"], rows)
 
     return summary
 
@@ -1086,6 +1079,42 @@ def preview_body_text(text: str, limit: int = 160) -> str:
     if len(preview) <= limit:
         return preview
     return preview[: limit - 3] + "..."
+
+
+def log_field_key(label: str) -> str:
+    """Convert a UI label into a stable log field name."""
+    return re.sub(r"[^a-z0-9]+", "_", label.casefold()).strip("_")
+
+
+def normalize_log_value(value):
+    """Collapse multiline values so non-interactive logs stay single-line."""
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, list):
+        return [normalize_log_value(item) for item in value]
+    return value
+
+
+def print_message_decision(
+    console: Console, subject: str, rows: list[tuple[str, object]]
+):
+    """Render message decisions richly for terminals and compactly for logs."""
+    if console.is_terminal:
+        table = Table(show_header=False, box=None)
+        table.add_column()
+        table.add_column()
+        for label, value in rows:
+            table.add_row(label, str(value))
+        console.print(Panel(table, title=subject[:80], expand=False))
+        return
+
+    parts = []
+    for label, value in rows:
+        normalized_value = normalize_log_value(value)
+        parts.append(
+            f"{log_field_key(label)}={json.dumps(normalized_value, ensure_ascii=False)}"
+        )
+    print("message_decision " + " ".join(parts))
 
 
 def body_rule_exists(
