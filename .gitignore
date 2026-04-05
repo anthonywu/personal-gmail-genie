@@ -1,0 +1,10 @@
+.env.*
+
+*.pickle
+credentials.json
+token.json
+
+__pycache__/
+.ruff_cache/
+
+.plan/
