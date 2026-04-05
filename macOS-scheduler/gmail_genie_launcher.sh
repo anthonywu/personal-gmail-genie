@@ -4,11 +4,12 @@
 set -e
 
 # Config
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_LABEL="com.gmail.genie"
 AGENT_PLIST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
 LOG_FILE="${HOME}/.local/share/gmail_genie/daemon.log"
 CONFIG_DIR="${HOME}/.config/gmail-genie"
+UV_BIN=""
 
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -25,8 +26,10 @@ create_plist() {
     <string>${AGENT_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${REPO_DIR}/.venv/bin/python</string>
+        <string>${UV_BIN}</string>
+        <string>run</string>
         <string>${REPO_DIR}/gmail_genie.py</string>
+        <string>run</string>
         <string>--interval-seconds</string>
         <string>600</string>
     </array>
@@ -57,20 +60,22 @@ check_prereqs() {
         echo "Error: gmail_genie.py not found in $REPO_DIR"
         exit 1
     fi
-    
-    if [ ! -d "${REPO_DIR}/.venv" ]; then
-        echo "Error: Python virtual environment not found. Please run setup first:"
-        echo "  brew install uv && uv venv && source .venv/bin/activate && uv pip install -r requirements.txt"
+
+    if ! command -v uv &> /dev/null; then
+        echo "Error: uv not found. Please install it first:"
+        echo "  brew install uv"
         exit 1
     fi
+
+    UV_BIN="$(command -v uv)"
 }
 
 install() {
     check_prereqs
-    
+
     # Create plist file
     create_plist
-    
+
     echo "Gmail Genie Launch Agent installed successfully."
     echo "Use 'start' command to start the service."
 }
@@ -86,11 +91,9 @@ uninstall() {
 }
 
 start() {
-    if [ ! -f "$AGENT_PLIST" ]; then
-        echo "Gmail Genie Launch Agent not installed. Installing..."
-        install
-    fi
-    
+    check_prereqs
+    create_plist
+
     launchctl load -w "$AGENT_PLIST"
     echo "Gmail Genie Launch Agent started."
     echo "Logs available at: $LOG_FILE"
@@ -175,7 +178,7 @@ case "$1" in
         echo "  install    Create and install the Launch Agent plist"
         echo "  uninstall  Remove the Launch Agent"
         echo "  start      Start the Gmail Genie service"
-        echo "  stop       Stop the Gmail Genie service" 
+        echo "  stop       Stop the Gmail Genie service"
         echo "  restart    Restart the Gmail Genie service"
         echo "  status     Show the current status"
         echo "  logs       Show recent log entries"

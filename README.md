@@ -1,24 +1,35 @@
 # Gmail Genie
 
-A Gmail assistant that automates email management based on user-defined rules.
+[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
+[![Python 3.13+](https://img.shields.io/badge/python-%3E%3D3.13-blue.svg)](https://www.python.org/downloads/)
+[![GitHub last commit](https://img.shields.io/github/last-commit/anthonywu/personal-gmail-genie)](https://github.com/anthonywu/personal-gmail-genie)
 
-Goal: Give Gmail users personal agency, security, and privacy to add agentic assistants to their email.
+A Gmail assistant that automates email management based on user-defined
+rules.
+
+Goal: Give Gmail users personal agency, security, and privacy to add
+agentic assistants to their email.
 
 ## Usage
 
 ### One-time Setup
 
-1. Get your `credentials.json` file and save it in the project directory.
-   - Go to Google Cloud Console and create a project
+1. Get your `credentials.json` file and save it to
+   `~/.config/gmail-genie/credentials.json`.
+   - Go to [Google Cloud Console](https://console.cloud.google.com) and
+     create a project
    - Enable the Gmail API
+   - Navigate to credentials: `https://console.cloud.google.com/apis/api/gmail.googleapis.com/credentials?project=<project-name>`
    - Create OAuth 2.0 credentials (Desktop application)
-   - Download the credentials JSON file and save as `credentials.json`
+   - Download the credentials JSON file and save as
+     `~/.config/gmail-genie/credentials.json`
 
 2. Install dependencies:
+
    ```bash
-   brew install uv
-   uv venv && source .venv/bin/activate
-   uv pip install -r requirements.txt
+   curl -LsSf https://astral.sh/uv/install.sh | sh # or `brew install uv`
+   uv sync
+   uv run gmail_genie.py --help
    ```
 
 3. Create your rules file (see `rules_examples.json` for template)
@@ -26,8 +37,25 @@ Goal: Give Gmail users personal agency, security, and privacy to add agentic ass
 ### Running the Script
 
 Run manually:
+
 ```bash
-python gmail_genie.py [--rules PATH] [--query QUERY] [--interval-seconds SECONDS]
+uv run gmail_genie.py run [--rules PATH] [--query QUERY]
+  [--interval-seconds SECONDS] [--dry-run] [--once]
+```
+
+Dependencies are tracked in `pyproject.toml` and `uv.lock`.
+
+Use `--once` to process a single pass and exit instead of polling forever.
+Use `--dry-run` to preview archive/delete decisions without changing Gmail.
+
+For Cloud Run, `gcloud-scheduled-jobs/.env.local` also supports optional
+`NTFY_BASE_URL` and `NTFY_TOPIC` settings. When configured, the job only sends
+an `ntfy` push if it actually archives, deletes, or unsubscribes something.
+
+Run the container locally with your existing Gmail config mounted in:
+
+```bash
+just --justfile gcloud-scheduled-jobs/justfile run-local
 ```
 
 ### Launch Agent (macOS)
@@ -36,21 +64,22 @@ For automatic startup and management:
 
 ```bash
 # Make the launcher script executable
-chmod +x gmail_genie_launcher.sh
+chmod +x macOS-scheduler/gmail_genie_launcher.sh
 
 # Install the Launch Agent (creates plist in ~/Library/LaunchAgents/)
-./gmail_genie_launcher.sh install
+./macOS-scheduler/gmail_genie_launcher.sh install
 
 # Start the service
-./gmail_genie_launcher.sh start
+./macOS-scheduler/gmail_genie_launcher.sh start
 
 # Other commands
-./gmail_genie_launcher.sh status    # Check if running
-./gmail_genie_launcher.sh logs      # View recent logs
-./gmail_genie_launcher.sh tail      # Follow logs in real-time (Ctrl+C to exit)
-./gmail_genie_launcher.sh stop      # Stop the service
-./gmail_genie_launcher.sh restart   # Restart the service
-./gmail_genie_launcher.sh uninstall # Remove the Launch Agent
+./macOS-scheduler/gmail_genie_launcher.sh status    # Check if running
+./macOS-scheduler/gmail_genie_launcher.sh logs      # View recent logs
+./macOS-scheduler/gmail_genie_launcher.sh tail      # Follow logs in real-time
+                                                  # (Ctrl+C to exit)
+./macOS-scheduler/gmail_genie_launcher.sh stop      # Stop the service
+./macOS-scheduler/gmail_genie_launcher.sh restart   # Restart the service
+./macOS-scheduler/gmail_genie_launcher.sh uninstall # Remove the Launch Agent
 ```
 
 The Launch Agent configuration is stored at: `~/Library/LaunchAgents/com.gmail.genie.plist`
@@ -85,4 +114,5 @@ Logs are stored at: `~/.local/share/gmail_genie/daemon.log`
 
 ## Related Projects
 
-Many related attempts on PyPI and GitHub throughout the years, but few were built with 2024 LLM capabilities in mind.
+Many related attempts on PyPI and GitHub throughout the years, but few were
+built with 2024 LLM capabilities in mind.
