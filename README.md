@@ -1,5 +1,9 @@
 # Gmail Genie
 
+[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
+[![Python 3.13+](https://img.shields.io/badge/python-%3E%3D3.13-blue.svg)](https://www.python.org/downloads/)
+[![GitHub last commit](https://img.shields.io/github/last-commit/anthonywu/personal-gmail-genie)](https://github.com/anthonywu/personal-gmail-genie)
+
 A Gmail assistant that automates email management based on user-defined
 rules.
 
@@ -49,21 +53,21 @@ For automatic startup and management:
 
 ```bash
 # Make the launcher script executable
-chmod +x gmail_genie_launcher.sh
+chmod +x macOS-scheduler/gmail_genie_launcher.sh
 
 # Install the Launch Agent (creates plist in ~/Library/LaunchAgents/)
-./gmail_genie_launcher.sh install
+./macOS-scheduler/gmail_genie_launcher.sh install
 
 # Start the service
-./gmail_genie_launcher.sh start
+./macOS-scheduler/gmail_genie_launcher.sh start
 
 # Other commands
-./gmail_genie_launcher.sh status    # Check if running
-./gmail_genie_launcher.sh logs      # View recent logs
-./gmail_genie_launcher.sh tail      # Follow logs in real-time (Ctrl+C to exit)
-./gmail_genie_launcher.sh stop      # Stop the service
-./gmail_genie_launcher.sh restart   # Restart the service
-./gmail_genie_launcher.sh uninstall # Remove the Launch Agent
+./macOS-scheduler/gmail_genie_launcher.sh status    # Check if running
+./macOS-scheduler/gmail_genie_launcher.sh logs      # View recent logs
+./macOS-scheduler/gmail_genie_launcher.sh tail      # Follow logs in real-time (Ctrl+C to exit)
+./macOS-scheduler/gmail_genie_launcher.sh stop      # Stop the service
+./macOS-scheduler/gmail_genie_launcher.sh restart   # Restart the service
+./macOS-scheduler/gmail_genie_launcher.sh uninstall # Remove the Launch Agent
 ```
 
 The Launch Agent configuration is stored at: `~/Library/LaunchAgents/com.gmail.genie.plist`

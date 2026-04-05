@@ -4,7 +4,7 @@
 set -e
 
 # Config
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_LABEL="com.gmail.genie"
 AGENT_PLIST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
 LOG_FILE="${HOME}/.local/share/gmail_genie/daemon.log"
