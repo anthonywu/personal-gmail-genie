@@ -41,6 +41,8 @@ You must respond with exactly one of these actions:
 - Scams, fake offers, get-rich-quick schemes
 - Aggressive or deceptive marketing
 - Emails pretending to be from your bank/services without legitimate context
+- Political donation solicitations, campaign fundraising blasts, and recurring
+  requests for political contributions should be treated as SPAM
 
 ### High-Confidence Unsubscribe Signals
 - Newsletters or mailing lists you no longer want
@@ -75,6 +77,7 @@ Return a JSON object with exactly these fields:
 5. Consider the sender, subject, and body content equally.
 6. Be conservative: protecting important emails is more important than aggressive filtering.
 7. Mistaken identity emails (transactional/confirmations for accounts/orders/people you don't know) are DELETE with high confidence (0.80+), but NO_OP if there's any ambiguity.
+8. Political donation solicitations and campaign fundraising emails are SPAM, not DELETE, when they are clearly asking for money or political contributions.
 
 ## Examples
 
@@ -105,6 +108,21 @@ Response (assuming recipient is NOT Jennifer Wang):
   "action": "DELETE",
   "confidence": 0.85,
   "reason": "Mistaken identity - transactional email for different person's Amazon account. Similar email addresses suggest typo or wrong recipient."
+}
+```
+
+### Example 3: Political Donation Solicitation
+Given an email:
+- From: info@candidate-example.org
+- Subject: We need your $15 donation before midnight
+- Body: Chip in now to help our campaign hit its fundraising goal
+
+Response:
+```json
+{
+  "action": "SPAM",
+  "confidence": 0.96,
+  "reason": "Political fundraising solicitation asking for campaign donations"
 }
 ```
 
