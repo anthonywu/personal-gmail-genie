@@ -15,11 +15,11 @@ Goal: Give Gmail users personal agency, security, and privacy to add agentic ass
    - Download the credentials JSON file and save as `credentials.json`
 
 2. Install dependencies:
-   ```bash
-   brew install uv
-   uv venv && source .venv/bin/activate
-   uv pip install -r requirements.txt
-   ```
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh # or `brew install uv`
+    # the script is a 'uv run' script with all dependencies defined in the comment header
+    uv run gmail_genie.py
+    ```
 
 3. Create your rules file (see `rules_examples.json` for template)
 
@@ -27,7 +27,7 @@ Goal: Give Gmail users personal agency, security, and privacy to add agentic ass
 
 Run manually:
 ```bash
-python gmail_genie.py [--rules PATH] [--query QUERY] [--interval-seconds SECONDS]
+uv run gmail_genie.py [--rules PATH] [--query QUERY] [--interval-seconds SECONDS]
 ```
 
 ### Launch Agent (macOS)

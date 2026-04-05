@@ -2,8 +2,8 @@
 
 ## Setup & Running
 
-- Install: `brew install uv && uv venv && source .venv/bin/activate && uv pip install -r requirements.txt`
-- Run: `python gmail_genie.py [--rules PATH] [--query QUERY] [--interval-seconds SECONDS]`
+- Install uv: `brew install uv`
+- Run: `uv run gmail_genie.py [--rules PATH] [--query QUERY] [--interval-seconds SECONDS]`
 - macOS Launch Agent: `./gmail_genie_launcher.sh {install|start|stop|restart|status|logs|tail|uninstall}`
 - View Launch Agent logs: `./gmail_genie_launcher.sh tail`
 
@@ -19,7 +19,7 @@
 
 ## Project Structure
 
-- Single main Python file (`gmail_genie.py`)
+- Single-file `uv run` script (`gmail_genie.py`) with inline PEP 723 dependency metadata
 - Configuration in JSON files
 - Credentials handled via Google OAuth flow
 - Rich console output for formatted display

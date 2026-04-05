@@ -25,7 +25,8 @@ create_plist() {
     <string>${AGENT_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${REPO_DIR}/.venv/bin/python</string>
+        <string>${HOME}/.local/bin/uv</string>
+        <string>run</string>
         <string>${REPO_DIR}/gmail_genie.py</string>
         <string>--interval-seconds</string>
         <string>600</string>
@@ -57,20 +58,20 @@ check_prereqs() {
         echo "Error: gmail_genie.py not found in $REPO_DIR"
         exit 1
     fi
-    
-    if [ ! -d "${REPO_DIR}/.venv" ]; then
-        echo "Error: Python virtual environment not found. Please run setup first:"
-        echo "  brew install uv && uv venv && source .venv/bin/activate && uv pip install -r requirements.txt"
+
+    if ! command -v uv &> /dev/null; then
+        echo "Error: uv not found. Please install it first:"
+        echo "  brew install uv"
         exit 1
     fi
 }
 
 install() {
     check_prereqs
-    
+
     # Create plist file
     create_plist
-    
+
     echo "Gmail Genie Launch Agent installed successfully."
     echo "Use 'start' command to start the service."
 }
@@ -90,7 +91,7 @@ start() {
         echo "Gmail Genie Launch Agent not installed. Installing..."
         install
     fi
-    
+
     launchctl load -w "$AGENT_PLIST"
     echo "Gmail Genie Launch Agent started."
     echo "Logs available at: $LOG_FILE"
@@ -175,7 +176,7 @@ case "$1" in
         echo "  install    Create and install the Launch Agent plist"
         echo "  uninstall  Remove the Launch Agent"
         echo "  start      Start the Gmail Genie service"
-        echo "  stop       Stop the Gmail Genie service" 
+        echo "  stop       Stop the Gmail Genie service"
         echo "  restart    Restart the Gmail Genie service"
         echo "  status     Show the current status"
         echo "  logs       Show recent log entries"

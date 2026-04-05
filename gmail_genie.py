@@ -1,3 +1,13 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "google-api-python-client==2.193.0",
+#     "google-auth-oauthlib==1.3.1",
+#     "pydantic==2.12.5",
+#     "rich==14.3.3",
+# ]
+# ///
+
 import functools
 import itertools
 import time
