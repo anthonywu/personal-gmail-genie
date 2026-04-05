@@ -16,8 +16,8 @@
   when no subcommand is provided.
 - One-shot processing: `uv run gmail_genie.py run --once`.
 - Safe preview: `uv run gmail_genie.py run --dry-run --once`.
-- Lint: `just lint`. Today that only runs `ruff check gmail_genie.py` and
-  `ruff format gmail_genie.py`.
+- Lint: `just lint`. Runs `shellcheck` on all tracked shell files, then
+  `ruff check` and `ruff format` on `gmail_genie.py`.
 - LaunchAgent management:
   `./gmail_genie_launcher.sh {install|start|stop|restart|status|logs|tail|uninstall}`.
 - For routine non-destructive verification, use CLI help plus lint:
