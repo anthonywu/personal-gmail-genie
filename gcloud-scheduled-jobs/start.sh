@@ -9,47 +9,50 @@ LLM_DISABLE_REASON=""
 
 discover_tailnet_ip() {
   local peer_name="$1"
+  local target="$1"
 
-  [[ -n "$peer_name" ]] || return 1
+  [[ -n "$target" ]] || return 1
 
-  /usr/local/bin/tailscale status --json --peers | python3 -c '
-import json
-import sys
+  target="${target%.}"
+  target="${target,,}"
 
-target = sys.argv[1].rstrip(".").casefold()
-status = json.load(sys.stdin)
+  /usr/local/bin/tailscale status --json --peers | jq -er --arg target "$target" '
+    .Peer // {}
+    | to_entries[]
+    | .value as $peer
+    | ($peer.HostName // "" | ascii_downcase | rtrimstr(".")) as $host
+    | ($peer.DNSName // "" | ascii_downcase | rtrimstr(".")) as $dns
+    | [
+        $host,
+        $dns,
+        ($host | split(".")[0]),
+        ($dns | split(".")[0])
+      ] as $names
+    | select($names | index($target))
+    | [
+        ($peer.Online // false),
+        (
+          (($peer.TailscaleIPs // []) | map(select(contains(":") | not)) | .[0])
+          // (($peer.TailscaleIPs // [])[0])
+          // ""
+        )
+      ]
+    | @tsv
+  ' | {
+    local online
+    local ip
 
-for peer in (status.get("Peer") or {}).values():
-    host_name = str(peer.get("HostName", "")).rstrip(".").casefold()
-    dns_name = str(peer.get("DNSName", "")).rstrip(".").casefold()
-    candidates = {
-        host_name,
-        dns_name,
-        host_name.split(".", 1)[0],
-        dns_name.split(".", 1)[0],
-    }
-    candidates.discard("")
+    IFS=$'\t' read -r online ip || exit 1
 
-    if target not in candidates:
-        continue
+    if [[ "$online" != "true" ]]; then
+      exit 2
+    fi
+    if [[ -z "$ip" ]]; then
+      exit 3
+    fi
 
-    if not peer.get("Online"):
-        raise SystemExit(2)
-
-    ips = peer.get("TailscaleIPs") or []
-    for ip in ips:
-        if ":" not in ip:
-            print(ip)
-            raise SystemExit(0)
-
-    if ips:
-        print(ips[0])
-        raise SystemExit(0)
-
-    raise SystemExit(3)
-
-raise SystemExit(1)
-' "$peer_name"
+    printf '%s\n' "$ip"
+  }
 }
 
 disable_llm_features() {
