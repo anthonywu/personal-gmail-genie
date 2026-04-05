@@ -8,11 +8,12 @@ Goal: Give Gmail users personal agency, security, and privacy to add agentic ass
 
 ### One-time Setup
 
-1. Get your `credentials.json` file and save it in the project directory.
-   - Go to Google Cloud Console and create a project
+1. Get your `credentials.json` file and save it to `~/.config/gmail-genie/credentials.json`.
+   - Go to [Google Cloud Console](https://console.cloud.google.com) and create a project
    - Enable the Gmail API
+   - Navigate to credentials: `https://console.cloud.google.com/apis/api/gmail.googleapis.com/credentials?project=<project-name>`
    - Create OAuth 2.0 credentials (Desktop application)
-   - Download the credentials JSON file and save as `credentials.json`
+   - Download the credentials JSON file and save as `~/.config/gmail-genie/credentials.json`
 
 2. Install dependencies:
     ```bash
