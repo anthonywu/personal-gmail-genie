@@ -42,7 +42,10 @@ _run-docker cmd tty="" entrypoint="./start.sh":
     cleanup() { [[ -n "$tmp_authkey" ]] && rm -f "$tmp_authkey"; [[ -n "$temp_env_file" ]] && rm -f "$temp_env_file"; }
     trap cleanup EXIT
     if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then tmp_authkey="$(mktemp)"; printf '%s' "$TAILSCALE_AUTHKEY" > "$tmp_authkey"; authkey_mount=(-v "$tmp_authkey:/var/run/secrets/tailscale/authkey:ro"); fi
-    while IFS= read -r env_name; do env_args+=(-e "$env_name=${!env_name}"); done < <(compgen -A variable | grep -E '^TAILNET_.*_(HOSTNAME|IP)$' || true)
+    for env_name in OPENAI_API_KEY LLM_ACTION_API_KEY OPENAI_MODEL LLM_ACTION_MODEL LLM_ACTION_TIMEOUT_SECONDS OPENAI_BASE_URL LLM_ACTION_BASE_URL LLM_EVAL_ONLY; do
+        if [[ -n "${!env_name:-}" ]]; then env_args+=(-e "$env_name=${!env_name}"); fi
+    done
+    while IFS= read -r env_name; do env_args+=(-e "$env_name=${!env_name}"); done < <(compgen -A variable | grep -E '^TAILNET_.*_(HOSTNAME|IP|SCHEME|PORT|PATH)$' || true)
     docker run --rm {{ tty }} \
     --entrypoint "{{ entrypoint }}" \
     ${authkey_mount[@]+"${authkey_mount[@]}"} \

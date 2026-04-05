@@ -4,6 +4,7 @@ set -euo pipefail
 TAILSCALED_PID=""
 APP_PID=""
 TAILSCALE_AUTHKEY_PATH="${TAILSCALE_AUTHKEY_PATH:-/var/run/secrets/tailscale/authkey}"
+OPENAI_API_KEY_PATH="${OPENAI_API_KEY_PATH:-/var/run/secrets/llm/openai_api_key}"
 TAILSCALE_SOCKS5_HOST="${TAILSCALE_SOCKS5_HOST:-127.0.0.1}"
 TAILSCALE_SOCKS5_PORT="${TAILSCALE_SOCKS5_PORT:-1055}"
 LLM_FEATURES_DISABLED=""
@@ -102,10 +103,44 @@ disable_llm_features() {
   echo "Warning: ${reason}. Disabling LLM features for this run." >&2
 }
 
+load_openai_api_key() {
+  local api_key=""
+
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    export LLM_ACTION_API_KEY="${LLM_ACTION_API_KEY:-$OPENAI_API_KEY}"
+    return 0
+  fi
+  if [[ -n "${LLM_ACTION_API_KEY:-}" ]]; then
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-$LLM_ACTION_API_KEY}"
+    return 0
+  fi
+  if [ -r "$OPENAI_API_KEY_PATH" ]; then
+    IFS= read -r api_key < "$OPENAI_API_KEY_PATH" || true
+  fi
+  if [[ -n "$api_key" ]]; then
+    export OPENAI_API_KEY="$api_key"
+    export LLM_ACTION_API_KEY="$api_key"
+    echo "Loaded OpenAI API key from $OPENAI_API_KEY_PATH"
+  fi
+}
+
+probe_tailnet_llm_host() {
+  local llm_ip="${TAILNET_LLM_API_IP:-}"
+  local llm_port="${TAILNET_LLM_API_PORT:-8000}"
+
+  [[ -n "$llm_ip" ]] || return 0
+  if nc -z -w 1 "$llm_ip" "$llm_port" >/dev/null 2>&1; then
+    echo "Confirmed LLM host reachability at ${llm_ip}:${llm_port}"
+    return 0
+  fi
+
+  disable_llm_features "LLM host ${llm_ip}:${llm_port} is unreachable"
+}
+
 build_tailnet_llm_base_url() {
   local ip="$1"
   local scheme="${TAILNET_LLM_API_SCHEME:-http}"
-  local port="${TAILNET_LLM_API_PORT:-11434}"
+  local port="${TAILNET_LLM_API_PORT:-8000}"
   local path="${TAILNET_LLM_API_PATH:-/v1}"
 
   [[ -n "$ip" ]] || return 1
@@ -195,28 +230,70 @@ discover_tailnet_hostnames() {
   done < <(env | grep '^TAILNET_.*_HOSTNAME=' || true)
 }
 
+llm_runtime_is_configured() {
+  local base_url="${LLM_ACTION_BASE_URL:-${OPENAI_BASE_URL:-}}"
+  local model="${LLM_ACTION_MODEL:-${OPENAI_MODEL:-}}"
+  local api_key="${LLM_ACTION_API_KEY:-${OPENAI_API_KEY:-}}"
+
+  [[ -n "$base_url" ]] && [[ -n "$model" ]] && [[ -n "$api_key" ]]
+}
+
+maybe_enable_llm_flag() {
+  local arg
+
+  [[ -z "$LLM_FEATURES_DISABLED" ]] || return 0
+  [[ "${APP_ARGS[0]:-}" == "run" ]] || return 0
+  llm_runtime_is_configured || return 0
+
+  for arg in "${APP_ARGS[@]}"; do
+    [[ "$arg" == "--enable-llm" ]] && return 0
+  done
+
+  APP_ARGS+=("--enable-llm")
+  echo "Auto-enabled --enable-llm because the LLM endpoint is configured and reachable"
+}
+
+maybe_enable_llm_eval_flag() {
+  local arg
+  local llm_eval_only="${LLM_EVAL_ONLY:-}"
+
+  [[ "${APP_ARGS[0]:-}" == "run" ]] || return 0
+  case "$llm_eval_only" in
+    1 | true | TRUE | yes | YES | on | ON) ;;
+    *) return 0 ;;
+  esac
+
+  for arg in "${APP_ARGS[@]}"; do
+    [[ "$arg" == "--llm-eval-only" ]] && return 0
+  done
+
+  APP_ARGS+=("--llm-eval-only")
+  echo "Auto-enabled --llm-eval-only because LLM_EVAL_ONLY=${llm_eval_only}"
+}
+
 prepare_app_args() {
   APP_ARGS=("$@")
 
-  if [[ -z "$LLM_FEATURES_DISABLED" ]]; then
-    return 0
-  fi
+  if [[ -n "$LLM_FEATURES_DISABLED" ]]; then
+    local arg
+    local filtered_args=()
+    local removed_enable_llm=""
+    for arg in "${APP_ARGS[@]}"; do
+      if [[ "$arg" == "--enable-llm" ]]; then
+        removed_enable_llm="1"
+        continue
+      fi
+      filtered_args+=("$arg")
+    done
+    APP_ARGS=("${filtered_args[@]}")
 
-  local arg
-  local filtered_args=()
-  local removed_enable_llm=""
-  for arg in "${APP_ARGS[@]}"; do
-    if [[ "$arg" == "--enable-llm" ]]; then
-      removed_enable_llm="1"
-      continue
+    if [[ -n "$removed_enable_llm" ]]; then
+      echo "Warning: removed --enable-llm because ${LLM_DISABLE_REASON}" >&2
     fi
-    filtered_args+=("$arg")
-  done
-  APP_ARGS=("${filtered_args[@]}")
-
-  if [[ -n "$removed_enable_llm" ]]; then
-    echo "Warning: removed --enable-llm because ${LLM_DISABLE_REASON}" >&2
   fi
+
+  maybe_enable_llm_flag
+  maybe_enable_llm_eval_flag
 }
 
 # shellcheck disable=SC2329
@@ -256,6 +333,7 @@ TAILSCALE_AUTHKEY=""
 if [ -r "$TAILSCALE_AUTHKEY_PATH" ]; then
   IFS= read -r TAILSCALE_AUTHKEY < "$TAILSCALE_AUTHKEY_PATH" || true
 fi
+load_openai_api_key
 
 if [ -n "$TAILSCALE_AUTHKEY" ]; then
   echo "DEBUG: Starting Tailscale with auth key file: $TAILSCALE_AUTHKEY_PATH"
@@ -274,6 +352,7 @@ if [ -n "$TAILSCALE_AUTHKEY" ]; then
   unset TAILSCALE_AUTHKEY
   echo "Tailscale connected"
   discover_tailnet_hostnames
+  probe_tailnet_llm_host
   configure_tailnet_llm_base_url
   
 else

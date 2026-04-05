@@ -16,6 +16,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import httpx
+from openai import APIConnectionError, APITimeoutError, OpenAI
 from pydantic import BaseModel
 from rich.console import Console
 from rich.table import Table
@@ -37,10 +38,20 @@ LLM_ACTION_MODEL = os.getenv("LLM_ACTION_MODEL", os.getenv("OPENAI_MODEL", "")).
 LLM_ACTION_API_KEY = os.getenv(
     "LLM_ACTION_API_KEY", os.getenv("OPENAI_API_KEY", "")
 ).strip()
+LLM_ACTION_CONNECT_TIMEOUT_SECONDS = 2.5
 LLM_ACTION_TIMEOUT_SECONDS = float(os.getenv("LLM_ACTION_TIMEOUT_SECONDS", "30"))
+LLM_ACTION_SYSTEM_PROMPT_PATH = Path(__file__).with_name("llm_action_system_prompt.txt")
+LLM_ACTION_INLINE_SYSTEM_PROMPT = (
+    "Classify the email into exactly one action: ARCHIVE, DELETE, SPAM, "
+    "UNSUBSCRIBE, or NO_OP. Return only a JSON object with keys action, "
+    "confidence, and reason. Choose UNSUBSCRIBE only when "
+    "one_click_unsubscribe_available is true. If unsure, return NO_OP."
+)
 LOG_DIR = (
     Path("~/.local/share/gmail_genie").expanduser().mkdir(parents=True, exist_ok=True)
 )
+LLM_ACTION_CLIENT: OpenAI | None = None
+LLM_ACTION_RUNTIME_DISABLED_REASON: str | None = None
 
 
 # Define a model with Literal fields
@@ -49,6 +60,8 @@ class ActionModel(BaseModel):
     source: Literal["RULE", "ML_ACTION", "LLM_ACTION"] = "RULE"
     reason: str | None = None
     confidence: float | None = None
+    duration_ms: float | None = None
+    evaluated: bool = False
 
 
 class BodyContainsRuleModel(BaseModel):
@@ -342,6 +355,7 @@ def get_message_details(service, msg_id, user_id="me"):
         # breakpoint()
         return {
             "id": msg_id,
+            "threadId": message["threadId"],
             "subject": subject,
             "from": from_email,
             "to": to_email,
@@ -503,6 +517,19 @@ def genie_action_label_name(action: str) -> str:
     return f"genie/{action.lower()}"
 
 
+def genie_llm_eval_label_name() -> str:
+    """Build the user label name used to mark messages already LLM-evaluated."""
+    return "genie/llm-eval"
+
+
+def genie_decision_label_names() -> list[str]:
+    """Return all user label names used to mark genie decisions."""
+    return [
+        genie_action_label_name(action)
+        for action in ["ARCHIVE", "DELETE", "SPAM", "UNSUBSCRIBE", "NO_OP"]
+    ]
+
+
 def apply_genie_action_label(service, msg_id, action, label_name_to_id, user_id="me"):
     """Best-effort label application for messages acted on by Gmail Genie."""
     label_id = ensure_label(
@@ -516,6 +543,91 @@ def apply_genie_action_label(service, msg_id, action, label_name_to_id, user_id=
     except Exception as exc:
         print(f"Warning: could not apply genie label for {msg_id}: {exc}")
         return False
+
+
+def apply_labels_by_name(service, msg_id, label_names, label_name_to_id, user_id="me"):
+    """Best-effort label application for one or more Gmail label names."""
+    label_ids = []
+    for label_name in label_names:
+        label_id = ensure_label(service, label_name, label_name_to_id, user_id=user_id)
+        if not label_id:
+            return False
+        label_ids.append(label_id)
+    try:
+        add_labels(service, msg_id, label_ids, user_id=user_id)
+        return True
+    except Exception as exc:
+        print(f"Warning: could not apply labels {label_names!r} for {msg_id}: {exc}")
+        return False
+
+
+def build_llm_eval_query(query: str | None) -> str:
+    """Exclude already-evaluated messages from the LLM eval candidate set."""
+    exclusions = [f'-label:"{genie_llm_eval_label_name()}"']
+    exclusions.extend(
+        f'-label:"{label_name}"' for label_name in genie_decision_label_names()
+    )
+    exclusion = " ".join(exclusions)
+    if query:
+        return f"{query} {exclusion}"
+    return f"is:unread {exclusion}"
+
+
+def message_has_any_genie_label(message_dict, genie_label_ids: set[str]) -> bool:
+    """Return whether a message already carries any genie-managed user label."""
+    label_ids = set(message_dict.get("labelIds", []))
+    return bool(label_ids.intersection(genie_label_ids))
+
+
+def get_header_value(headers: dict, header_name: str) -> str:
+    """Return a message header value using case-insensitive lookup."""
+    target = header_name.casefold()
+    for name, value in headers.items():
+        if name.casefold() == target:
+            return value
+    return ""
+
+
+def build_self_plus_address(email_address: str, tag: str = "geniedecision") -> str:
+    """Return a plus-address variant for self-directed eval replies."""
+    _name, addr = email.utils.parseaddr(email_address)
+    local_part, separator, domain = addr.partition("@")
+    if not separator or not local_part or not domain:
+        return addr
+    base_local_part = local_part.split("+", 1)[0]
+    return f"{base_local_part}+{tag}@{domain}"
+
+
+def build_reply_subject(subject: str) -> str:
+    """Normalize a subject line for threaded reply sends."""
+    if subject.casefold().startswith("re:"):
+        return subject
+    return f"Re: {subject}"
+
+
+def build_eval_reply_body(
+    decision: ActionModel, evaluated_at: datetime, message_dict
+) -> str:
+    """Build the self-reply body that records an LLM eval decision."""
+    parts = [
+        "gmail-genie LLM eval",
+        "",
+        f"Decision: {decision.action}",
+    ]
+    if decision.confidence is not None:
+        parts.append(f"Confidence: {decision.confidence:.2f}")
+    if decision.duration_ms is not None:
+        parts.append(f"Latency Ms: {decision.duration_ms:.1f}")
+    if decision.reason:
+        parts.append(f"Reason: {decision.reason}")
+    parts.extend(
+        [
+            f"Evaluated At: {evaluated_at.isoformat()}",
+            f"Original From: {message_dict.get('from', '')}",
+            f"Original Subject: {message_dict.get('subject', '')}",
+        ]
+    )
+    return "\n".join(parts)
 
 
 def load_ml_action_artifact(
@@ -638,8 +750,48 @@ def extract_json_object(text: str) -> dict | None:
     return None
 
 
+@functools.cache
+def load_llm_action_system_prompt() -> str:
+    """Load the LLM classifier system prompt from disk."""
+    try:
+        return LLM_ACTION_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return LLM_ACTION_INLINE_SYSTEM_PROMPT
+
+
+def disable_llm_action_runtime(reason: str) -> None:
+    """Disable LLM fallback for the remainder of the process."""
+    global LLM_ACTION_RUNTIME_DISABLED_REASON
+
+    if not LLM_ACTION_RUNTIME_DISABLED_REASON:
+        LLM_ACTION_RUNTIME_DISABLED_REASON = reason
+
+
+def get_llm_action_client() -> OpenAI | None:
+    """Create or reuse the OpenAI-compatible client for LLM fallback."""
+    global LLM_ACTION_CLIENT
+
+    if LLM_ACTION_RUNTIME_DISABLED_REASON:
+        return None
+    if not llm_action_is_configured():
+        return None
+    if LLM_ACTION_CLIENT is None:
+        LLM_ACTION_CLIENT = OpenAI(
+            api_key=LLM_ACTION_API_KEY,
+            base_url=LLM_ACTION_BASE_URL,
+            timeout=httpx.Timeout(
+                timeout=LLM_ACTION_TIMEOUT_SECONDS,
+                connect=LLM_ACTION_CONNECT_TIMEOUT_SECONDS,
+            ),
+            max_retries=0,
+        )
+    return LLM_ACTION_CLIENT
+
+
 def llm_action_is_configured() -> bool:
     """Return whether the LLM fallback has enough configuration to run."""
+    if LLM_ACTION_RUNTIME_DISABLED_REASON:
+        return False
     return bool(LLM_ACTION_BASE_URL and LLM_ACTION_MODEL and LLM_ACTION_API_KEY)
 
 
@@ -651,84 +803,133 @@ def predict_llm_action(message_dict, enable_llm: bool) -> ActionModel:
             source="LLM_ACTION",
             reason="LLM fallback disabled",
         )
-    if not llm_action_is_configured():
+    client = get_llm_action_client()
+    if client is None:
+        reason = LLM_ACTION_RUNTIME_DISABLED_REASON or "LLM fallback not configured"
         return ActionModel(
             action="NO_OP",
             source="LLM_ACTION",
-            reason="LLM fallback not configured",
+            reason=reason,
         )
 
-    request_payload = {
-        "model": LLM_ACTION_MODEL,
-        "temperature": 0,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Classify the email into exactly one action: ARCHIVE, DELETE, "
-                    "SPAM, UNSUBSCRIBE, or NO_OP. Return only a JSON object with "
-                    "keys action, confidence, and reason. Choose UNSUBSCRIBE only "
-                    "when one_click_unsubscribe_available is true. If unsure, "
-                    "return NO_OP."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "from": message_dict.get("from", ""),
-                        "subject": message_dict.get("subject", ""),
-                        "one_click_unsubscribe_available": message_has_one_click_unsubscribe(
-                            message_dict.get("headers", {})
-                        ),
-                        "raw_body": message_dict.get("content", ""),
-                    },
-                    ensure_ascii=True,
-                ),
-            },
-        ],
-    }
+    started_at = time.perf_counter()
 
     try:
-        response = httpx.post(
-            f"{LLM_ACTION_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {LLM_ACTION_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=request_payload,
-            timeout=LLM_ACTION_TIMEOUT_SECONDS,
+        response = client.chat.completions.create(
+            model=LLM_ACTION_MODEL,
+            temperature=0,
+            messages=[
+                {
+                    "role": "system",
+                    "content": load_llm_action_system_prompt(),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "from": message_dict.get("from", ""),
+                            "subject": message_dict.get("subject", ""),
+                            "one_click_unsubscribe_available": message_has_one_click_unsubscribe(
+                                message_dict.get("headers", {})
+                            ),
+                            "raw_body": message_dict.get("content", ""),
+                        },
+                        ensure_ascii=True,
+                    ),
+                },
+            ],
         )
-        response.raise_for_status()
-        payload = response.json()
-        content = payload["choices"][0]["message"]["content"]
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        content = response.choices[0].message.content or ""
         response_json = extract_json_object(content)
         if response_json is None:
+            emit_app_span(
+                "llm_action",
+                duration_ms,
+                status="invalid_response",
+                message_id=message_dict.get("id"),
+                model=LLM_ACTION_MODEL,
+            )
             return ActionModel(
                 action="NO_OP",
                 source="LLM_ACTION",
                 reason="LLM response did not contain valid JSON",
+                duration_ms=duration_ms,
             )
         decision = LLMActionResponseModel.model_validate(response_json)
+    except APIConnectionError:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        emit_app_span(
+            "llm_action",
+            duration_ms,
+            status="connection_error",
+            message_id=message_dict.get("id"),
+            model=LLM_ACTION_MODEL,
+        )
+        disable_llm_action_runtime("LLM fallback unavailable")
+        return ActionModel(
+            action="NO_OP",
+            source="LLM_ACTION",
+            reason="LLM fallback unavailable",
+            duration_ms=duration_ms,
+        )
+    except APITimeoutError:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        emit_app_span(
+            "llm_action",
+            duration_ms,
+            status="timeout",
+            message_id=message_dict.get("id"),
+            model=LLM_ACTION_MODEL,
+        )
+        return ActionModel(
+            action="NO_OP",
+            source="LLM_ACTION",
+            reason=f"LLM request timed out after {LLM_ACTION_TIMEOUT_SECONDS:.1f}s",
+            duration_ms=duration_ms,
+        )
     except Exception as exc:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        emit_app_span(
+            "llm_action",
+            duration_ms,
+            status="error",
+            message_id=message_dict.get("id"),
+            model=LLM_ACTION_MODEL,
+            error=str(exc),
+        )
         return ActionModel(
             action="NO_OP",
             source="LLM_ACTION",
             reason=f"LLM request failed: {exc}",
+            duration_ms=duration_ms,
         )
 
+    emit_app_span(
+        "llm_action",
+        duration_ms,
+        status="ok",
+        message_id=message_dict.get("id"),
+        model=LLM_ACTION_MODEL,
+        action=decision.action,
+        confidence=decision.confidence,
+    )
     if not is_action_supported_for_message(decision.action, message_dict):
         return ActionModel(
             action="NO_OP",
             source="LLM_ACTION",
             confidence=decision.confidence,
             reason=f"Predicted {decision.action} but message lacks one-click unsubscribe",
+            duration_ms=duration_ms,
+            evaluated=True,
         )
     return ActionModel(
         action=decision.action,
         source="LLM_ACTION",
         confidence=decision.confidence,
         reason=decision.reason,
+        duration_ms=duration_ms,
+        evaluated=True,
     )
 
 
@@ -750,25 +951,32 @@ def classify_fallback_action(
     return ml_decision
 
 
-def print_classifier_status(rule_file_path, enable_llm: bool) -> None:
+def print_classifier_status(
+    rule_file_path, enable_llm: bool, llm_eval_only: bool = False
+) -> None:
     """Print fallback classifier status once at startup."""
     console = Console()
-    try:
-        rules, _rule_path = _load_or_init_rules(rule_file_path)
-    except SystemExit:
-        raise
-
-    ml_config = rules.ml_action
-    ml_model_path = Path(ml_config.model_path).expanduser()
-    if not ml_config.enabled:
-        ml_status = "off"
-    elif ml_model_path.exists():
-        ml_status = f"on ({ml_model_path})"
+    if llm_eval_only:
+        ml_status = "bypassed (LLM eval only)"
     else:
-        ml_status = f"on, no model at {ml_model_path} so fallback is NO_OP"
+        try:
+            rules, _rule_path = _load_or_init_rules(rule_file_path)
+        except SystemExit:
+            raise
+
+        ml_config = rules.ml_action
+        ml_model_path = Path(ml_config.model_path).expanduser()
+        if not ml_config.enabled:
+            ml_status = "off"
+        elif ml_model_path.exists():
+            ml_status = f"on ({ml_model_path})"
+        else:
+            ml_status = f"on, no model at {ml_model_path} so fallback is NO_OP"
 
     if enable_llm and llm_action_is_configured():
         llm_status = f"on ({LLM_ACTION_MODEL} @ {LLM_ACTION_BASE_URL})"
+    elif LLM_ACTION_RUNTIME_DISABLED_REASON:
+        llm_status = f"off ({LLM_ACTION_RUNTIME_DISABLED_REASON})"
     elif enable_llm:
         llm_status = "on, but missing LLM_ACTION_BASE_URL / LLM_ACTION_MODEL / LLM_ACTION_API_KEY"
     else:
@@ -824,11 +1032,24 @@ def list_history(service, start_history_id, user_id="me", history_types=None):
     return history
 
 
-def send_message(service, to, subject, body_text, user_id="me", thread_id=None):
+def send_message(
+    service,
+    to,
+    subject,
+    body_text,
+    user_id="me",
+    thread_id=None,
+    in_reply_to=None,
+    references=None,
+):
     """Send an email message. Returns the sent message resource."""
     msg = email.mime.text.MIMEText(body_text)
     msg["to"] = to
     msg["subject"] = subject
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     body = {"raw": raw}
     if thread_id:
@@ -867,7 +1088,9 @@ def main(rule_file_path, interval_seconds=600, run_once=False, **process_kwargs)
     console = Console()
     try:
         print_classifier_status(
-            rule_file_path, enable_llm=process_kwargs.get("enable_llm", False)
+            rule_file_path,
+            enable_llm=process_kwargs.get("enable_llm", False),
+            llm_eval_only=process_kwargs.get("llm_eval_only", False),
         )
         while True:
             print(time.strftime("%Y-%m-%d %H:%M"))
@@ -913,51 +1136,96 @@ def process(
     content_preview_length=0,
     dry_run=False,
     enable_llm=False,
+    llm_eval_only=False,
 ):
-    mail_rules, _rule_path = _load_or_init_rules(rule_file_path)
-    # print(mail_rules)
+    enable_llm = enable_llm or llm_eval_only
 
     # Authenticate and create service
     service = authenticate()
     console = Console()
-    if dry_run:
+    if llm_eval_only:
+        console.print(
+            "[bold yellow]LLM eval only:[/bold yellow] every matching message will "
+            "be classified by the LLM, replied to in-thread, labeled, and skipped "
+            "on future eval runs.\n"
+        )
+    elif dry_run:
         console.print(
             "[bold yellow]Dry run:[/bold yellow] no mailbox changes will be made.\n"
         )
     # List all messages
-    if query is None:
+    llm_eval_query = build_llm_eval_query(query) if llm_eval_only else query
+    if llm_eval_query is None:
         messages = list_unread_messages(service)
         print(f"Found {len(messages)} messages unread")
     else:
-        messages = list_messages(service, query=query, max_results=50)
-        print(f"Found {len(messages)} messages matching query")
+        messages = list_messages(service, query=llm_eval_query, max_results=50)
+        if llm_eval_only:
+            print(
+                f"Found {len(messages)} messages matching query excluding existing "
+                "genie eval/decision labels"
+            )
+        else:
+            print(f"Found {len(messages)} messages matching query")
     summary = {
         "processed": len(messages),
         "archived": 0,
         "deleted": 0,
         "spammed": 0,
         "unsubscribed": 0,
+        "llm_eval_labeled": 0,
     }
-    ml_artifact = load_ml_action_artifact(mail_rules.ml_action)
+    mail_rules = None
+    ml_artifact = None
+    profile = get_profile(service) if llm_eval_only else None
+    authenticated_email = profile.get("emailAddress", "") if profile else ""
+    llm_eval_reply_to = (
+        build_self_plus_address(authenticated_email) if authenticated_email else ""
+    )
+    if not llm_eval_only:
+        mail_rules, _rule_path = _load_or_init_rules(rule_file_path)
+        ml_artifact = load_ml_action_artifact(mail_rules.ml_action)
 
     messages_actions: list[tuple[dict, ActionModel]] = []
+    label_map = get_label_map(service)
+    label_name_to_id = {name: label_id for label_id, name in label_map.items()}
+    llm_eval_label_name = genie_llm_eval_label_name()
+    llm_eval_label_id = None
+    genie_eval_skip_label_ids = {
+        label_id
+        for label_name, label_id in label_name_to_id.items()
+        if label_name == llm_eval_label_name
+        or label_name in set(genie_decision_label_names())
+    }
+    if llm_eval_only:
+        llm_eval_label_id = ensure_label(service, llm_eval_label_name, label_name_to_id)
+        if llm_eval_label_id:
+            label_map[llm_eval_label_id] = llm_eval_label_name
+            genie_eval_skip_label_ids.add(llm_eval_label_id)
+
     for msg in messages:
         details = get_message_details(service, msg["id"])
         if details:
-            rule_action = mail_rules.process_message(details)
-            if rule_action.action == "NO_OP":
-                rule_action = classify_fallback_action(
-                    details, mail_rules, ml_artifact, enable_llm
-                )
-            messages_actions.append((details, rule_action))
+            if llm_eval_only and message_has_any_genie_label(
+                details, genie_eval_skip_label_ids
+            ):
+                continue
+            if llm_eval_only:
+                decision = predict_llm_action(details, enable_llm=True)
+            else:
+                decision = mail_rules.process_message(details)
+                if decision.action == "NO_OP":
+                    decision = classify_fallback_action(
+                        details, mail_rules, ml_artifact, enable_llm
+                    )
+            messages_actions.append((details, decision))
         else:
             print(f"No details: {msg}")
         del details
 
+    summary["processed"] = len(messages_actions)
     messages_actions = sorted(messages_actions, key=lambda x: x[1].action)
 
-    label_map = get_label_map(service)
-    label_name_to_id = get_label_name_to_id_map(service)
     for action, group in itertools.groupby(messages_actions, key=lambda x: x[1].action):
         for msg_details, decision in group:
             message_id = msg_details["id"]
@@ -969,11 +1237,95 @@ def process(
                 ("Subject", msg_details["subject"]),
                 ("Decision Source", decision.source),
             ]
+            if decision.duration_ms is not None:
+                rows.append(("Decision Duration Ms", f"{decision.duration_ms:.1f}"))
             if decision.confidence is not None:
                 rows.append(("Decision Confidence", f"{decision.confidence:.2f}"))
             if decision.reason:
                 rows.append(("Decision Reason", decision.reason))
-            if action == "DELETE":
+            if llm_eval_only:
+                rows.append(("LLM Eval Classification", action))
+                decision_label_name = genie_action_label_name(action)
+                reply_sent = False
+                if decision.evaluated and llm_eval_reply_to:
+                    original_message_id = get_header_value(
+                        msg_details.get("headers", {}), "Message-ID"
+                    )
+                    original_references = get_header_value(
+                        msg_details.get("headers", {}), "References"
+                    )
+                    reply_references = " ".join(
+                        part
+                        for part in [original_references, original_message_id]
+                        if part
+                    )
+                    try:
+                        send_message(
+                            service,
+                            to=llm_eval_reply_to,
+                            subject=build_reply_subject(msg_details["subject"]),
+                            body_text=build_eval_reply_body(
+                                decision, datetime.now(), msg_details
+                            ),
+                            thread_id=msg_details.get("threadId"),
+                            in_reply_to=original_message_id or None,
+                            references=reply_references or None,
+                        )
+                        reply_sent = True
+                        rows.append(("Eval Reply Sent", llm_eval_reply_to))
+                    except Exception as exc:
+                        rows.append(
+                            (
+                                "Eval Reply Sent",
+                                f"{llm_eval_reply_to} (failed: {exc})",
+                            )
+                        )
+                elif decision.evaluated:
+                    rows.append(("Eval Reply Sent", "skipped (no authenticated email)"))
+                else:
+                    rows.append(("Eval Reply Sent", "skipped (LLM call incomplete)"))
+                if reply_sent and apply_labels_by_name(
+                    service,
+                    message_id,
+                    [llm_eval_label_name, decision_label_name],
+                    label_name_to_id,
+                ):
+                    summary["llm_eval_labeled"] += 1
+                    rows.append(("Eval Label Applied", llm_eval_label_name))
+                    rows.append(("Decision Label Applied", decision_label_name))
+                elif reply_sent:
+                    rows.append(
+                        (
+                            "Eval Label Applied",
+                            f"{llm_eval_label_name} / {decision_label_name} (failed)",
+                        )
+                    )
+                    rows.append(
+                        (
+                            "Decision Label Applied",
+                            f"{decision_label_name} / {llm_eval_label_name} (failed)",
+                        )
+                    )
+                else:
+                    rows.append(("Eval Label Applied", "skipped (reply not sent)"))
+                    rows.append(("Decision Label Applied", "skipped (reply not sent)"))
+                rows.append(("Mailbox Action", "skipped (LLM eval only)"))
+                if action == "UNSUBSCRIBE":
+                    unsub_header = msg_details["headers"].get(
+                        "List-Unsubscribe",
+                        msg_details["headers"].get("list-unsubscribe", ""),
+                    )
+                    unsub_url = extract_one_click_unsubscribe_url(unsub_header)
+                    if unsub_url:
+                        rows.append(("Unsubscribe URL", unsub_url))
+                if content_preview_length > 0:
+                    rows.append(
+                        (
+                            "Content Preview",
+                            msg_details["content"][:content_preview_length],
+                        )
+                    )
+            elif action == "DELETE":
                 if dry_run:
                     rows.append(("Action Preview", action))
                     rows.append(
@@ -1093,6 +1445,22 @@ def normalize_log_value(value):
     if isinstance(value, list):
         return [normalize_log_value(item) for item in value]
     return value
+
+
+def emit_app_span(name: str, duration_ms: float, **fields) -> None:
+    """Emit a compact structured timing span for application work."""
+    parts = [
+        f"name={json.dumps(name, ensure_ascii=False)}",
+        f"duration_ms={json.dumps(round(duration_ms, 1))}",
+    ]
+    for label, value in fields.items():
+        if value is None:
+            continue
+        parts.append(
+            f"{log_field_key(label)}="
+            f"{json.dumps(normalize_log_value(value), ensure_ascii=False)}"
+        )
+    print("app_span " + " ".join(parts))
 
 
 def print_message_decision(
@@ -1620,6 +1988,11 @@ if __name__ == "__main__":
                 action="store_true",
                 help="enable the LLM fallback classifier after rules and ML",
             )
+            sub.add_argument(
+                "--llm-eval-only",
+                action="store_true",
+                help="classify every message with the LLM, reply in-thread to self, and label it without applying mailbox actions",
+            )
 
     # self-test subcommand
     subparsers.add_parser(
@@ -1640,6 +2013,7 @@ if __name__ == "__main__":
         dry_run = getattr(args, "dry_run", False)
         run_once = getattr(args, "once", False)
         enable_llm = getattr(args, "enable_llm", False)
+        llm_eval_only = getattr(args, "llm_eval_only", False)
         main(
             rules,
             query=query,
@@ -1648,4 +2022,5 @@ if __name__ == "__main__":
             dry_run=dry_run,
             run_once=run_once,
             enable_llm=enable_llm,
+            llm_eval_only=llm_eval_only,
         )

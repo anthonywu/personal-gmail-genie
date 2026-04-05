@@ -17,3 +17,8 @@ if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then
   log "Syncing Tailscale auth key to Secret Manager: $SECRET_TAILSCALE_AUTHKEY"
   sync_secret_var "$SECRET_TAILSCALE_AUTHKEY" TAILSCALE_AUTHKEY
 fi
+
+if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "${SECRET_OPENAI_API_KEY:-}" ]]; then
+  log "Syncing OpenAI-compatible API key to Secret Manager: $SECRET_OPENAI_API_KEY"
+  sync_secret_var "$SECRET_OPENAI_API_KEY" OPENAI_API_KEY
+fi

@@ -52,6 +52,8 @@ Use `--once` to process a single pass and exit instead of polling forever.
 Use `--dry-run` to preview archive, trash, spam, and unsubscribe decisions
 without changing Gmail.
 Use `--enable-llm` to turn on the `llm-action` fallback classifier for that run.
+Use `--llm-eval-only` to classify every matched message with the LLM and print
+the recommendation without changing Gmail.
 Startup output prints whether `ml-action` and `llm-action` are on or off.
 
 For Cloud Run, `gcloud-scheduled-jobs/.env.local` also supports optional
@@ -64,9 +66,23 @@ When Tailscale is enabled, you can also set `TAILNET_*_HOSTNAME` values such as
 `TAILNET_*_IP` variables for the job. For the LLM endpoint specifically,
 `start.sh` also derives `LLM_ACTION_BASE_URL` automatically from
 `TAILNET_LLM_API_IP` unless you already set `LLM_ACTION_BASE_URL` or
-`OPENAI_BASE_URL`. The defaults are `http`, port `11434`, and path `/v1`, and
+`OPENAI_BASE_URL`. The defaults are `http`, port `8000`, and path `/v1`, and
 you can override them with `TAILNET_LLM_API_SCHEME`, `TAILNET_LLM_API_PORT`,
-and `TAILNET_LLM_API_PATH`.
+and `TAILNET_LLM_API_PATH`. If the host resolves and the base URL, model, and
+API key are all present, `start.sh` auto-enables the LLM fallback for `run`.
+If the TCP probe or request times out, it disables the LLM path for that run
+instead of blocking mailbox processing.
+
+For the current tailnet-backed server, set these in
+`gcloud-scheduled-jobs/.env.local` before `just run-local` or deploy:
+
+```bash
+TAILNET_LLM_API_HOSTNAME=dgx
+TAILNET_LLM_API_PORT=8000
+OPENAI_MODEL=gemma-4-31b-it
+OPENAI_API_KEY=...
+LLM_EVAL_ONLY=1
+```
 
 Run the container locally with your existing Gmail config mounted in:
 
@@ -207,19 +223,27 @@ available.
   file is missing or its confidence is below `ml_action.min_confidence`, it
   returns `NO_OP`.
 - `llm-action` is the second fallback and is disabled by default. Enable it per
-  run with `uv run gmail_genie.py run --enable-llm ...`.
-- `llm-action` sends the full extracted email body to an OpenAI-compatible
+  run with `uv run gmail_genie.py run --enable-llm ...`. The container wrapper
+  auto-adds `--enable-llm` when the tailnet endpoint is configured and
+  reachable.
+- `llm-action` uses the official `openai` Python SDK and sends the full
+  extracted email body to an OpenAI-compatible
   `/chat/completions` endpoint and expects a JSON response with `action`,
   `confidence`, and `reason`.
+- `--llm-eval-only` bypasses rules and ML, runs the LLM against every matched
+  message, and prints what it would do without applying any Gmail actions.
 - `UNSUBSCRIBE` is only accepted from fallback classifiers when the email
   advertises one-click unsubscribe support.
 
 Configure `llm-action` with environment variables:
 
-- `LLM_ACTION_BASE_URL`
-- `LLM_ACTION_MODEL`
-- `LLM_ACTION_API_KEY`
+- `LLM_ACTION_BASE_URL` or `OPENAI_BASE_URL`
+- `LLM_ACTION_MODEL` or `OPENAI_MODEL`
+- `LLM_ACTION_API_KEY` or `OPENAI_API_KEY`
 - `LLM_ACTION_TIMEOUT_SECONDS` optional, defaults to `30`
+
+The client still uses a fast connect timeout of about `2.5` seconds so an
+unreachable tailnet host fails closed quickly.
 
 An example ML artifact schema is tracked at `ml_action_model.example.json`.
 
