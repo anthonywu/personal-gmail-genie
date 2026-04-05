@@ -5,6 +5,7 @@ import email.utils
 import functools
 import itertools
 import json
+import math
 import os
 import pickle
 import re
@@ -29,6 +30,14 @@ CONFIG_DIR = Path("~/.config/gmail-genie").expanduser()
 AUTH_TOKEN_FILE = CONFIG_DIR / "token.pickle"
 NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
+LLM_ACTION_BASE_URL = os.getenv(
+    "LLM_ACTION_BASE_URL", os.getenv("OPENAI_BASE_URL", "")
+).rstrip("/")
+LLM_ACTION_MODEL = os.getenv("LLM_ACTION_MODEL", os.getenv("OPENAI_MODEL", "")).strip()
+LLM_ACTION_API_KEY = os.getenv(
+    "LLM_ACTION_API_KEY", os.getenv("OPENAI_API_KEY", "")
+).strip()
+LLM_ACTION_TIMEOUT_SECONDS = float(os.getenv("LLM_ACTION_TIMEOUT_SECONDS", "30"))
 LOG_DIR = (
     Path("~/.local/share/gmail_genie").expanduser().mkdir(parents=True, exist_ok=True)
 )
@@ -37,6 +46,9 @@ LOG_DIR = (
 # Define a model with Literal fields
 class ActionModel(BaseModel):
     action: Literal["ARCHIVE", "DELETE", "SPAM", "UNSUBSCRIBE", "NO_OP"]
+    source: Literal["RULE", "ML_ACTION", "LLM_ACTION"] = "RULE"
+    reason: str | None = None
+    confidence: float | None = None
 
 
 class BodyContainsRuleModel(BaseModel):
@@ -44,6 +56,32 @@ class BodyContainsRuleModel(BaseModel):
 
     contains: str
     action: Literal["ARCHIVE", "DELETE", "SPAM", "UNSUBSCRIBE"]
+
+
+class MLActionConfigModel(BaseModel):
+    """Config for the CPU-friendly fallback ML classifier."""
+
+    enabled: bool = True
+    model_path: str = "~/.config/gmail-genie/ml-action-model.json"
+    min_confidence: float = 0.85
+
+
+class MLActionArtifactModel(BaseModel):
+    """Serialized multinomial naive Bayes artifact for fallback inference."""
+
+    model_version: str = "1"
+    model_type: Literal["multinomial_nb"] = "multinomial_nb"
+    class_log_priors: dict[str, float]
+    token_log_probs: dict[str, dict[str, float]]
+    default_token_log_probs: dict[str, float]
+
+
+class LLMActionResponseModel(BaseModel):
+    """Structured LLM classification response."""
+
+    action: Literal["ARCHIVE", "DELETE", "SPAM", "UNSUBSCRIBE", "NO_OP"]
+    confidence: float | None = None
+    reason: str | None = None
 
 
 class MailRuleModel(BaseModel):
@@ -55,6 +93,7 @@ class MailRuleModel(BaseModel):
     from_address_auto_spam: list[str] = []
     from_address_auto_unsubscribe: list[str] = []
     body_contains: list[BodyContainsRuleModel] = []
+    ml_action: MLActionConfigModel = MLActionConfigModel()
 
     def process_message(self, message_dict) -> ActionModel:
         """Return the first matching action for a message.
@@ -76,9 +115,7 @@ class MailRuleModel(BaseModel):
             if addr_s.strip().lower() == addr:
                 return ActionModel(action="SPAM")
         headers = message_dict.get("headers", {})
-        has_one_click = (
-            "List-Unsubscribe-Post" in headers or "list-unsubscribe-post" in headers
-        )
+        has_one_click = message_has_one_click_unsubscribe(headers)
         for addr_u in self.from_address_auto_unsubscribe:
             if addr_u.strip().lower() == addr and has_one_click:
                 return ActionModel(action="UNSUBSCRIBE")
@@ -253,6 +290,28 @@ def extract_message_content(payload) -> str:
         return fallback
 
     return decode_message_body_part(payload)
+
+
+def message_has_one_click_unsubscribe(headers: dict) -> bool:
+    """Return whether headers advertise RFC 8058 one-click unsubscribe."""
+    return "List-Unsubscribe-Post" in headers or "list-unsubscribe-post" in headers
+
+
+def classifier_input_text(message_dict) -> str:
+    """Build the text used by fallback classifiers."""
+    return "\n".join(
+        [
+            f"From: {message_dict.get('from', '')}",
+            f"Subject: {message_dict.get('subject', '')}",
+            "",
+            message_dict.get("content", ""),
+        ]
+    )
+
+
+def tokenize_ml_text(text: str) -> list[str]:
+    """Tokenize email text for naive Bayes inference."""
+    return re.findall(r"[a-z0-9][a-z0-9_.'+-]{1,}", text.casefold())
 
 
 def get_message_details(service, msg_id, user_id="me"):
@@ -459,6 +518,266 @@ def apply_genie_action_label(service, msg_id, action, label_name_to_id, user_id=
         return False
 
 
+def load_ml_action_artifact(
+    config: MLActionConfigModel,
+) -> MLActionArtifactModel | None:
+    """Load the configured fallback ML artifact if it exists."""
+    if not config.enabled:
+        return None
+    model_path = Path(config.model_path).expanduser()
+    if not model_path.exists():
+        return None
+    try:
+        return MLActionArtifactModel.model_validate_json(model_path.read_text())
+    except Exception as exc:
+        print(f"Warning: could not load ML action model from {model_path}: {exc}")
+        return None
+
+
+def softmax_probabilities(scores: dict[str, float]) -> dict[str, float]:
+    """Convert log-space scores to probabilities."""
+    if not scores:
+        return {}
+    max_score = max(scores.values())
+    exp_scores = {label: math.exp(score - max_score) for label, score in scores.items()}
+    total = sum(exp_scores.values())
+    if total <= 0:
+        return {label: 0.0 for label in scores}
+    return {label: score / total for label, score in exp_scores.items()}
+
+
+def is_action_supported_for_message(action: str, message_dict) -> bool:
+    """Return whether an action is valid for the message's current metadata."""
+    if action != "UNSUBSCRIBE":
+        return True
+    return message_has_one_click_unsubscribe(message_dict.get("headers", {}))
+
+
+def predict_ml_action(
+    message_dict,
+    config: MLActionConfigModel,
+    artifact: MLActionArtifactModel | None,
+) -> ActionModel:
+    """Run multinomial naive Bayes fallback classification."""
+    if not config.enabled:
+        return ActionModel(
+            action="NO_OP",
+            source="ML_ACTION",
+            reason="ML fallback disabled",
+        )
+    if artifact is None:
+        return ActionModel(
+            action="NO_OP",
+            source="ML_ACTION",
+            reason="ML model unavailable",
+        )
+
+    text = classifier_input_text(message_dict)
+    tokens = tokenize_ml_text(text)
+    if not tokens:
+        return ActionModel(
+            action="NO_OP",
+            source="ML_ACTION",
+            reason="No classifier tokens extracted",
+        )
+
+    scores = dict(artifact.class_log_priors)
+    for action in scores:
+        token_scores = artifact.token_log_probs.get(action, {})
+        default_score = artifact.default_token_log_probs.get(action, -12.0)
+        scores[action] += sum(
+            token_scores.get(token, default_score) for token in tokens
+        )
+
+    probabilities = softmax_probabilities(scores)
+    if not probabilities:
+        return ActionModel(
+            action="NO_OP",
+            source="ML_ACTION",
+            reason="ML model produced no probabilities",
+        )
+
+    best_action, best_confidence = max(probabilities.items(), key=lambda item: item[1])
+    if best_confidence < config.min_confidence:
+        return ActionModel(
+            action="NO_OP",
+            source="ML_ACTION",
+            confidence=best_confidence,
+            reason=f"Below ML confidence threshold {config.min_confidence:.2f}",
+        )
+    if not is_action_supported_for_message(best_action, message_dict):
+        return ActionModel(
+            action="NO_OP",
+            source="ML_ACTION",
+            confidence=best_confidence,
+            reason=f"Predicted {best_action} but message lacks one-click unsubscribe",
+        )
+    return ActionModel(
+        action=best_action,
+        source="ML_ACTION",
+        confidence=best_confidence,
+        reason="Multinomial naive Bayes fallback",
+    )
+
+
+def extract_json_object(text: str) -> dict | None:
+    """Extract and parse the first JSON object from text."""
+    stripped = text.strip()
+    candidates = [stripped]
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.append(stripped[start : end + 1])
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def llm_action_is_configured() -> bool:
+    """Return whether the LLM fallback has enough configuration to run."""
+    return bool(LLM_ACTION_BASE_URL and LLM_ACTION_MODEL and LLM_ACTION_API_KEY)
+
+
+def predict_llm_action(message_dict, enable_llm: bool) -> ActionModel:
+    """Call an OpenAI-compatible endpoint for structured fallback classification."""
+    if not enable_llm:
+        return ActionModel(
+            action="NO_OP",
+            source="LLM_ACTION",
+            reason="LLM fallback disabled",
+        )
+    if not llm_action_is_configured():
+        return ActionModel(
+            action="NO_OP",
+            source="LLM_ACTION",
+            reason="LLM fallback not configured",
+        )
+
+    request_payload = {
+        "model": LLM_ACTION_MODEL,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Classify the email into exactly one action: ARCHIVE, DELETE, "
+                    "SPAM, UNSUBSCRIBE, or NO_OP. Return only a JSON object with "
+                    "keys action, confidence, and reason. Choose UNSUBSCRIBE only "
+                    "when one_click_unsubscribe_available is true. If unsure, "
+                    "return NO_OP."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "from": message_dict.get("from", ""),
+                        "subject": message_dict.get("subject", ""),
+                        "one_click_unsubscribe_available": message_has_one_click_unsubscribe(
+                            message_dict.get("headers", {})
+                        ),
+                        "raw_body": message_dict.get("content", ""),
+                    },
+                    ensure_ascii=True,
+                ),
+            },
+        ],
+    }
+
+    try:
+        response = httpx.post(
+            f"{LLM_ACTION_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {LLM_ACTION_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=request_payload,
+            timeout=LLM_ACTION_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        content = payload["choices"][0]["message"]["content"]
+        response_json = extract_json_object(content)
+        if response_json is None:
+            return ActionModel(
+                action="NO_OP",
+                source="LLM_ACTION",
+                reason="LLM response did not contain valid JSON",
+            )
+        decision = LLMActionResponseModel.model_validate(response_json)
+    except Exception as exc:
+        return ActionModel(
+            action="NO_OP",
+            source="LLM_ACTION",
+            reason=f"LLM request failed: {exc}",
+        )
+
+    if not is_action_supported_for_message(decision.action, message_dict):
+        return ActionModel(
+            action="NO_OP",
+            source="LLM_ACTION",
+            confidence=decision.confidence,
+            reason=f"Predicted {decision.action} but message lacks one-click unsubscribe",
+        )
+    return ActionModel(
+        action=decision.action,
+        source="LLM_ACTION",
+        confidence=decision.confidence,
+        reason=decision.reason,
+    )
+
+
+def classify_fallback_action(
+    message_dict,
+    rules: MailRuleModel,
+    ml_artifact: MLActionArtifactModel | None,
+    enable_llm: bool,
+) -> ActionModel:
+    """Run fallback classifiers after hardcoded rules return NO_OP."""
+    ml_decision = predict_ml_action(message_dict, rules.ml_action, ml_artifact)
+    if ml_decision.action != "NO_OP":
+        return ml_decision
+    llm_decision = predict_llm_action(message_dict, enable_llm)
+    if llm_decision.action != "NO_OP":
+        return llm_decision
+    if enable_llm and llm_decision.reason:
+        return llm_decision
+    return ml_decision
+
+
+def print_classifier_status(rule_file_path, enable_llm: bool) -> None:
+    """Print fallback classifier status once at startup."""
+    console = Console()
+    try:
+        rules, _rule_path = _load_or_init_rules(rule_file_path)
+    except SystemExit:
+        raise
+
+    ml_config = rules.ml_action
+    ml_model_path = Path(ml_config.model_path).expanduser()
+    if not ml_config.enabled:
+        ml_status = "off"
+    elif ml_model_path.exists():
+        ml_status = f"on ({ml_model_path})"
+    else:
+        ml_status = f"on, no model at {ml_model_path} so fallback is NO_OP"
+
+    if enable_llm and llm_action_is_configured():
+        llm_status = f"on ({LLM_ACTION_MODEL} @ {LLM_ACTION_BASE_URL})"
+    elif enable_llm:
+        llm_status = "on, but missing LLM_ACTION_BASE_URL / LLM_ACTION_MODEL / LLM_ACTION_API_KEY"
+    else:
+        llm_status = "off"
+
+    console.print(f"[cyan]ML action:[/cyan] {ml_status}")
+    console.print(f"[cyan]LLM action:[/cyan] {llm_status}\n")
+
+
 def list_threads(service, user_id="me", query="", max_results=None):
     """List threads matching the specified query."""
     response = (
@@ -547,6 +866,9 @@ def post_one_click_unsubscribe(url: str) -> bool:
 def main(rule_file_path, interval_seconds=600, run_once=False, **process_kwargs):
     console = Console()
     try:
+        print_classifier_status(
+            rule_file_path, enable_llm=process_kwargs.get("enable_llm", False)
+        )
         while True:
             print(time.strftime("%Y-%m-%d %H:%M"))
             try:
@@ -585,8 +907,14 @@ def main(rule_file_path, interval_seconds=600, run_once=False, **process_kwargs)
         raise SystemExit(0)
 
 
-def process(rule_file_path, query=None, content_preview_length=0, dry_run=False):
-    mail_rules, rule_path = _load_or_init_rules(rule_file_path)
+def process(
+    rule_file_path,
+    query=None,
+    content_preview_length=0,
+    dry_run=False,
+    enable_llm=False,
+):
+    mail_rules, _rule_path = _load_or_init_rules(rule_file_path)
     # print(mail_rules)
 
     # Authenticate and create service
@@ -610,12 +938,17 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
         "spammed": 0,
         "unsubscribed": 0,
     }
+    ml_artifact = load_ml_action_artifact(mail_rules.ml_action)
 
-    messages_actions: list[dict, ActionModel] = []
+    messages_actions: list[tuple[dict, ActionModel]] = []
     for msg in messages:
         details = get_message_details(service, msg["id"])
         if details:
             rule_action = mail_rules.process_message(details)
+            if rule_action.action == "NO_OP":
+                rule_action = classify_fallback_action(
+                    details, mail_rules, ml_artifact, enable_llm
+                )
             messages_actions.append((details, rule_action))
         else:
             print(f"No details: {msg}")
@@ -626,7 +959,7 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
     label_map = get_label_map(service)
     label_name_to_id = get_label_name_to_id_map(service)
     for action, group in itertools.groupby(messages_actions, key=lambda x: x[1].action):
-        for msg_details, _ in group:
+        for msg_details, decision in group:
             # Create a table with two columns
             table = Table(show_header=False, box=None)
             table.add_column()
@@ -636,6 +969,11 @@ def process(rule_file_path, query=None, content_preview_length=0, dry_run=False)
             table.add_row("Labels", " | ".join(label_names))
             table.add_row("From", msg_details["from"])
             table.add_row("Subject", msg_details["subject"])
+            table.add_row("Decision Source", decision.source)
+            if decision.confidence is not None:
+                table.add_row("Decision Confidence", f"{decision.confidence:.2f}")
+            if decision.reason:
+                table.add_row("Decision Reason", decision.reason)
             # breakpoint()
             if action == "DELETE":
                 if dry_run:
@@ -776,6 +1114,7 @@ def _load_or_init_rules(rule_path):
             from_address_auto_spam=[],
             from_address_auto_unsubscribe=[],
             body_contains=[],
+            ml_action=MLActionConfigModel(),
         )
         rule_path.parent.mkdir(parents=True, exist_ok=True)
         rule_path.write_text(json.dumps(rules.model_dump(), indent=2) + "\n")
@@ -1247,6 +1586,11 @@ if __name__ == "__main__":
                 action="store_true",
                 help="process one pass and exit",
             )
+            sub.add_argument(
+                "--enable-llm",
+                action="store_true",
+                help="enable the LLM fallback classifier after rules and ML",
+            )
 
     # self-test subcommand
     subparsers.add_parser(
@@ -1266,6 +1610,7 @@ if __name__ == "__main__":
         interval = getattr(args, "interval_seconds", 600)
         dry_run = getattr(args, "dry_run", False)
         run_once = getattr(args, "once", False)
+        enable_llm = getattr(args, "enable_llm", False)
         main(
             rules,
             query=query,
@@ -1273,4 +1618,5 @@ if __name__ == "__main__":
             interval_seconds=interval,
             dry_run=dry_run,
             run_once=run_once,
+            enable_llm=enable_llm,
         )

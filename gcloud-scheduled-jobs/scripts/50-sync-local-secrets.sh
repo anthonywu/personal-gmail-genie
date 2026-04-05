@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+OPS_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=./lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
@@ -10,3 +11,9 @@ load_env
 sync_secret_file "$SECRET_GMAIL_CREDENTIALS_JSON" "$LOCAL_GMAIL_CREDENTIALS_JSON"
 sync_secret_file "$SECRET_GMAIL_TOKEN_PICKLE" "$LOCAL_GMAIL_TOKEN_PICKLE"
 sync_secret_file "$SECRET_GMAIL_RULES_JSON" "$LOCAL_GMAIL_RULES_JSON"
+
+# Sync Tailscale auth key if provided
+if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then
+  log "Syncing Tailscale auth key to Secret Manager: $SECRET_TAILSCALE_AUTHKEY"
+  sync_secret_var "$SECRET_TAILSCALE_AUTHKEY" TAILSCALE_AUTHKEY
+fi

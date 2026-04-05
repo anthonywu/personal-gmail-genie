@@ -10,15 +10,30 @@ provision: enable-apis create-service-accounts create-artifact-registry create-s
 build:
     docker build -t {{ local_image }} {{ justfile_directory() }}/..
 
-run-local: build
+_run-docker cmd tty="" entrypoint="./start.sh":
+    #!/usr/bin/env bash
+    set -euo pipefail
     [[ -f "$HOME/.config/gmail-genie/credentials.json" ]]
     [[ -f "$HOME/.config/gmail-genie/token.pickle" ]]
     [[ -f "$HOME/.config/gmail-genie/rules.json" ]]
-    docker run --rm \
-      -v "$HOME/.config/gmail-genie/credentials.json:/root/.config/gmail-genie/credentials.json:ro" \
-      -v "$HOME/.config/gmail-genie/token.pickle:/root/.config/gmail-genie/token.pickle:ro" \
-      -v "$HOME/.config/gmail-genie/rules.json:/root/.config/gmail-genie/rules.json:ro" \
-      {{ local_image }} run --dry-run --once
+    tmp_authkey=""
+    authkey_mount=()
+    cleanup() { [[ -n "$tmp_authkey" ]] && rm -f "$tmp_authkey"; }
+    trap cleanup EXIT
+    if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then tmp_authkey="$(mktemp)"; printf '%s' "$TAILSCALE_AUTHKEY" > "$tmp_authkey"; authkey_mount=(-v "$tmp_authkey:/var/run/secrets/tailscale/authkey:ro"); fi
+    docker run --rm {{ tty }} \
+    --entrypoint "{{ entrypoint }}" \
+    "${authkey_mount[@]}" \
+    -v "$HOME/.config/gmail-genie/credentials.json:/root/.config/gmail-genie/credentials.json:ro" \
+    -v "$HOME/.config/gmail-genie/token.pickle:/root/.config/gmail-genie/token.pickle:ro" \
+    -v "$HOME/.config/gmail-genie/rules.json:/root/.config/gmail-genie/rules.json:ro" \
+    {{ local_image }} {{ cmd }}
+
+run-local: build
+    @just _run-docker "run --dry-run --once"
+
+sh-local: build
+    @just _run-docker "/bin/bash" "-it"
 
 enable-apis:
     ./scripts/10-enable-apis.sh

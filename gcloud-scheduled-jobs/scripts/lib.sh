@@ -25,13 +25,18 @@ require_file() {
 load_env() {
   local env_file="${ENV_FILE:-${1:-$DEFAULT_ENV_FILE}}"
 
-  [[ -f "$env_file" ]] || die "Missing env file: $env_file"
-  LOADED_ENV_FILE="$env_file"
+  # If dotenvx already injected environment, skip file sourcing
+  if [[ -n "${CLOUD_RUN_JOB_NAME:-}" ]]; then
+    LOADED_ENV_FILE="(environment via dotenvx)"
+  else
+    [[ -f "$env_file" ]] || die "Missing env file: $env_file"
+    LOADED_ENV_FILE="$env_file"
 
-  set -a
-  # shellcheck disable=SC1090
-  source "$env_file"
-  set +a
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
 
   resolve_gcloud_bin
   derive_project_id
@@ -67,7 +72,10 @@ derive_defaults() {
   IMAGE_URI="${GCP_ARTIFACT_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}"
   JOB_RUN_URI="https://run.googleapis.com/v2/projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/jobs/${CLOUD_RUN_JOB_NAME}:run"
   SECRET_MOUNTS="/var/run/gmail-genie/credentials/credentials.json=${SECRET_GMAIL_CREDENTIALS_JSON}:latest,/var/run/gmail-genie/token/token.pickle=${SECRET_GMAIL_TOKEN_PICKLE}:latest,/var/run/gmail-genie/rules/rules.json=${SECRET_GMAIL_RULES_JSON}:latest"
-  STARTUP_COMMAND="mkdir -p /root/.config/gmail-genie && cp /var/run/gmail-genie/credentials/credentials.json /root/.config/gmail-genie/credentials.json && cp /var/run/gmail-genie/token/token.pickle /root/.config/gmail-genie/token.pickle && cp /var/run/gmail-genie/rules/rules.json /root/.config/gmail-genie/rules.json && exec uv run --locked --no-sync gmail_genie.py run --once"
+  if [[ -n "${SECRET_TAILSCALE_AUTHKEY:-}" ]] && secret_has_versions "$SECRET_TAILSCALE_AUTHKEY"; then
+    SECRET_MOUNTS="${SECRET_MOUNTS},/var/run/secrets/tailscale/authkey=${SECRET_TAILSCALE_AUTHKEY}:latest"
+  fi
+  STARTUP_COMMAND="mkdir -p /root/.config/gmail-genie && cp /var/run/gmail-genie/credentials/credentials.json /root/.config/gmail-genie/credentials.json && cp /var/run/gmail-genie/token/token.pickle /root/.config/gmail-genie/token.pickle && cp /var/run/gmail-genie/rules/rules.json /root/.config/gmail-genie/rules.json && exec ./start.sh run --once"
   NTFY_BASE_URL="${NTFY_BASE_URL:-https://ntfy.sh}"
   JOB_ENV_VARS=""
   if [[ -n "${NTFY_TOPIC:-}" ]]; then
@@ -155,19 +163,21 @@ ensure_secret() {
 secret_has_versions() {
   local secret_name="$1"
 
-  [[ -n "$(gcloud secrets versions list --secret="$secret_name" --limit=1 --format='value(name)' 2>/dev/null)" ]]
+  [[ -n "$(gcloud secrets versions list "$secret_name" --limit=1 --format='value(name)' 2>/dev/null)" ]]
 }
 
 sync_secret_file() {
   local secret_name="$1"
   local local_path="$2"
   local temp_file
+  local version
 
   require_file "$local_path"
 
   if ! secret_has_versions "$secret_name"; then
-    log "Uploading first version for secret: $secret_name"
-    gcloud secrets versions add "$secret_name" --data-file="$local_path" >/dev/null
+    log "Creating secret with first version: $secret_name"
+    version=$(gcloud secrets versions add "$secret_name" --data-file="$local_path" --format='value(name)' 2>/dev/null)
+    log "Secret created: $secret_name (version $version)"
     return
   fi
 
@@ -176,13 +186,49 @@ sync_secret_file() {
 
   if cmp -s "$temp_file" "$local_path"; then
     rm -f "$temp_file"
-    log "Secret already matches local file: $secret_name"
+    log "Secret already up-to-date: $secret_name"
     return
   fi
 
   rm -f "$temp_file"
-  log "Uploading updated secret version: $secret_name"
-  gcloud secrets versions add "$secret_name" --data-file="$local_path" >/dev/null
+  version=$(gcloud secrets versions add "$secret_name" --data-file="$local_path" --format='value(name)' 2>/dev/null)
+  log "Secret updated: $secret_name (version $version)"
+}
+
+sync_secret_var() {
+  local secret_name="$1"
+  local var_name="$2"
+  local var_value="${!var_name:-}"
+  local temp_file
+  local version
+
+  [[ -n "$var_value" ]] || die "Environment variable not set: $var_name"
+
+  # Ensure secret exists
+  if ! gcloud secrets describe "$secret_name" >/dev/null 2>&1; then
+    log "Creating secret: $secret_name"
+    gcloud secrets create "$secret_name" --replication-policy="automatic" >/dev/null
+  fi
+
+  if ! secret_has_versions "$secret_name"; then
+    log "Creating secret with first version: $secret_name"
+    version=$(echo -n "$var_value" | gcloud secrets versions add "$secret_name" --data-file=- --format='value(name)' 2>/dev/null)
+    log "Secret created: $secret_name (version $version)"
+    return
+  fi
+
+  temp_file="$(mktemp)"
+  gcloud secrets versions access latest --secret="$secret_name" >"$temp_file"
+
+  if [[ "$(cat "$temp_file")" == "$var_value" ]]; then
+    rm -f "$temp_file"
+    log "Secret already up-to-date: $secret_name"
+    return
+  fi
+
+  rm -f "$temp_file"
+  version=$(echo -n "$var_value" | gcloud secrets versions add "$secret_name" --data-file=- --format='value(name)' 2>/dev/null)
+  log "Secret updated: $secret_name (version $version)"
 }
 
 ensure_artifact_registry_repo() {
