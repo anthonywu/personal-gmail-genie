@@ -1463,11 +1463,33 @@ def emit_app_span(name: str, duration_ms: float, **fields) -> None:
     print("app_span " + " ".join(parts))
 
 
+def running_on_cloud_run() -> bool:
+    """Return whether the process is running on Cloud Run services or jobs."""
+    return any(
+        os.getenv(name)
+        for name in ("K_SERVICE", "CLOUD_RUN_JOB", "CLOUD_RUN_EXECUTION")
+    )
+
+
+def should_render_rich_output(console: Console) -> bool:
+    """Return whether message decisions should use Rich terminal rendering."""
+    if running_on_cloud_run():
+        return False
+    if os.getenv("GMAIL_GENIE_PLAIN_LOGS", "").casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    return console.is_terminal
+
+
 def print_message_decision(
     console: Console, subject: str, rows: list[tuple[str, object]]
 ):
     """Render message decisions richly for terminals and compactly for logs."""
-    if console.is_terminal:
+    if should_render_rich_output(console):
         table = Table(show_header=False, box=None)
         table.add_column()
         table.add_column()
