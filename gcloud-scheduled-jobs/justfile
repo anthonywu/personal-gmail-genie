@@ -49,3 +49,6 @@ run-now:
 
 logs:
     ./scripts/95-tail-logs.sh
+
+log-viewer:
+    ./scripts/96-view-logs.sh

@@ -32,6 +32,8 @@
 - Cloud ops local build: `just --justfile gcloud-scheduled-jobs/justfile build`.
 - Cloud ops local run: `just --justfile gcloud-scheduled-jobs/justfile run-local`.
 - Cloud ops logs: `just --justfile gcloud-scheduled-jobs/justfile logs`.
+- Cloud ops log viewer:
+  `just --justfile gcloud-scheduled-jobs/justfile log-viewer`.
 - Shell lint for the Cloud ops scripts:
   `shellcheck -x -P gcloud-scheduled-jobs/scripts gcloud-scheduled-jobs/scripts/*.sh`.
 - LaunchAgent management:
