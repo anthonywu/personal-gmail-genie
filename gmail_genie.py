@@ -10,6 +10,7 @@
 
 import functools
 import itertools
+import json
 import time
 import pickle
 from pathlib import Path
@@ -233,13 +234,21 @@ def process(rule_file_path, query=None, content_preview_length=0):
     rule_path = Path(rule_file_path)
     if not rule_path.exists():
         console = Console()
-        console.print(f"\n[bold red]Rules file not found:[/bold red] {rule_path}\n")
-        console.print("[bold]To get started:[/bold]")
-        console.print("  1. Copy the example rules file:")
-        console.print(f"     cp rules_examples.json {rule_path}")
-        console.print("  2. Edit it to match your preferences")
-        console.print(f"  3. Run again: uv run gmail_genie.py --rules {rule_path}\n")
-        raise SystemExit(1)
+        console.print(f"\n[bold yellow]Rules file not found:[/bold yellow] {rule_path}\n")
+        response = input("Would you like to create a starter rules file? [Y/n] ").strip().lower()
+        if response in ("", "y", "yes"):
+            default_rules = MailRuleModel(
+                rule_version="1",
+                from_domain_auto_delete=[],
+                from_address_auto_archive=[],
+            )
+            rule_path.parent.mkdir(parents=True, exist_ok=True)
+            rule_path.write_text(json.dumps(default_rules.model_dump(), indent=2) + "\n")
+            console.print(f"\n[bold green]✅ Created rules file:[/bold green] {rule_path}")
+            console.print("[dim]Edit it to add your rules, then run again.[/dim]\n")
+        else:
+            console.print("\n[dim]No file created. Create one manually and try again.[/dim]\n")
+        raise SystemExit(0)
     mail_rules = MailRuleModel.model_validate_json(rule_path.read_text())
     # print(mail_rules)
 
