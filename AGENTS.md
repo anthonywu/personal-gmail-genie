@@ -87,10 +87,10 @@
 - `run --once` executes a single processing pass and exits. Without `--once`,
   `main()` still loops forever; `--interval-seconds 0` becomes a tight loop,
   not a single pass.
-- The generated LaunchAgent plist hardcodes the executable to
-  `~/.local/bin/uv` and also sets a minimal `PATH`. If `uv` is installed
-  somewhere else (for example via Homebrew or Nix), the agent can fail even
-  when `uv` works in your interactive shell.
+- The generated LaunchAgent plist resolves `uv` from `command -v uv` when the
+  plist is written and also sets a minimal `PATH`. If `uv` later moves,
+  restart or reinstall the agent so the plist is regenerated with the new
+  path.
 - `gcloud-scheduled-jobs/scripts/lib.sh` falls back to the active `gcloud`
   config project when `GCP_PROJECT_ID` is blank in `.env.local`, so keep the
   current `gcloud config set project ...` value in mind before running ops

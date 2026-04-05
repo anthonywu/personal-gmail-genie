@@ -9,6 +9,7 @@ AGENT_LABEL="com.gmail.genie"
 AGENT_PLIST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
 LOG_FILE="${HOME}/.local/share/gmail_genie/daemon.log"
 CONFIG_DIR="${HOME}/.config/gmail-genie"
+UV_BIN=""
 
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -25,9 +26,10 @@ create_plist() {
     <string>${AGENT_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${HOME}/.local/bin/uv</string>
+        <string>${UV_BIN}</string>
         <string>run</string>
         <string>${REPO_DIR}/gmail_genie.py</string>
+        <string>run</string>
         <string>--interval-seconds</string>
         <string>600</string>
     </array>
@@ -64,6 +66,8 @@ check_prereqs() {
         echo "  brew install uv"
         exit 1
     fi
+
+    UV_BIN="$(command -v uv)"
 }
 
 install() {
@@ -87,10 +91,8 @@ uninstall() {
 }
 
 start() {
-    if [ ! -f "$AGENT_PLIST" ]; then
-        echo "Gmail Genie Launch Agent not installed. Installing..."
-        install
-    fi
+    check_prereqs
+    create_plist
 
     launchctl load -w "$AGENT_PLIST"
     echo "Gmail Genie Launch Agent started."
