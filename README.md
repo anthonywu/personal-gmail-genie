@@ -1,35 +1,46 @@
 # Gmail Genie
 
-A Gmail assistant that automates email management based on user-defined rules.
+A Gmail assistant that automates email management based on user-defined
+rules.
 
-Goal: Give Gmail users personal agency, security, and privacy to add agentic assistants to their email.
+Goal: Give Gmail users personal agency, security, and privacy to add
+agentic assistants to their email.
 
 ## Usage
 
 ### One-time Setup
 
-1. Get your `credentials.json` file and save it to `~/.config/gmail-genie/credentials.json`.
-   - Go to [Google Cloud Console](https://console.cloud.google.com) and create a project
+1. Get your `credentials.json` file and save it to
+   `~/.config/gmail-genie/credentials.json`.
+   - Go to [Google Cloud Console](https://console.cloud.google.com) and
+     create a project
    - Enable the Gmail API
    - Navigate to credentials: `https://console.cloud.google.com/apis/api/gmail.googleapis.com/credentials?project=<project-name>`
    - Create OAuth 2.0 credentials (Desktop application)
-   - Download the credentials JSON file and save as `~/.config/gmail-genie/credentials.json`
+   - Download the credentials JSON file and save as
+     `~/.config/gmail-genie/credentials.json`
 
 2. Install dependencies:
-    ```bash
-    curl -LsSf https://astral.sh/uv/install.sh | sh # or `brew install uv`
-    # the script is a 'uv run' script with all dependencies defined in the comment header
-    uv run gmail_genie.py
-    ```
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh # or `brew install uv`
+   # the script is a 'uv run' script with all dependencies defined in the
+   # comment header
+   uv run gmail_genie.py
+   ```
 
 3. Create your rules file (see `rules_examples.json` for template)
 
 ### Running the Script
 
 Run manually:
+
 ```bash
-uv run gmail_genie.py [--rules PATH] [--query QUERY] [--interval-seconds SECONDS]
+uv run gmail_genie.py run [--rules PATH] [--query QUERY]
+  [--interval-seconds SECONDS] [--once]
 ```
+
+Use `--once` to process a single pass and exit instead of polling forever.
 
 ### Launch Agent (macOS)
 
@@ -86,4 +97,5 @@ Logs are stored at: `~/.local/share/gmail_genie/daemon.log`
 
 ## Related Projects
 
-Many related attempts on PyPI and GitHub throughout the years, but few were built with 2024 LLM capabilities in mind.
+Many related attempts on PyPI and GitHub throughout the years, but few were
+built with 2024 LLM capabilities in mind.
