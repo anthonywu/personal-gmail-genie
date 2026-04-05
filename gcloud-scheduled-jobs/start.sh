@@ -4,8 +4,39 @@ set -euo pipefail
 TAILSCALED_PID=""
 APP_PID=""
 TAILSCALE_AUTHKEY_PATH="${TAILSCALE_AUTHKEY_PATH:-/var/run/secrets/tailscale/authkey}"
+TAILSCALE_SOCKS5_HOST="${TAILSCALE_SOCKS5_HOST:-127.0.0.1}"
+TAILSCALE_SOCKS5_PORT="${TAILSCALE_SOCKS5_PORT:-1055}"
 LLM_FEATURES_DISABLED=""
 LLM_DISABLE_REASON=""
+
+process_running() {
+  local pid="$1"
+
+  [[ -n "$pid" ]] || return 1
+  ps -p "$pid" >/dev/null 2>&1
+}
+
+wait_for_tcp_listener() {
+  local host="$1"
+  local port="$2"
+  local label="$3"
+  local pid="${4:-}"
+  local attempt
+
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if nc -z "$host" "$port" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ -n "$pid" ]] && ! process_running "$pid"; then
+      echo "Warning: ${label} exited before ${host}:${port} became ready" >&2
+      return 1
+    fi
+    sleep 1
+  done
+
+  echo "Warning: timed out waiting for ${label} at ${host}:${port}" >&2
+  return 1
+}
 
 discover_tailnet_ip() {
   local peer_name="$1"
@@ -69,6 +100,42 @@ disable_llm_features() {
   unset LLM_ACTION_BASE_URL
   unset OPENAI_BASE_URL
   echo "Warning: ${reason}. Disabling LLM features for this run." >&2
+}
+
+build_tailnet_llm_base_url() {
+  local ip="$1"
+  local scheme="${TAILNET_LLM_API_SCHEME:-http}"
+  local port="${TAILNET_LLM_API_PORT:-11434}"
+  local path="${TAILNET_LLM_API_PATH:-/v1}"
+
+  [[ -n "$ip" ]] || return 1
+  [[ -n "$path" ]] && [[ "$path" != /* ]] && path="/$path"
+
+  if [[ -n "$port" ]]; then
+    printf '%s://%s:%s%s\n' "$scheme" "$ip" "$port" "$path"
+  else
+    printf '%s://%s%s\n' "$scheme" "$ip" "$path"
+  fi
+}
+
+configure_tailnet_llm_base_url() {
+  local llm_ip="${TAILNET_LLM_API_IP:-}"
+  local base_url
+
+  [[ -n "$llm_ip" ]] || return 0
+  if [[ -n "${LLM_ACTION_BASE_URL:-}" ]]; then
+    echo "Using preconfigured LLM_ACTION_BASE_URL=${LLM_ACTION_BASE_URL}"
+    return 0
+  fi
+  if [[ -n "${OPENAI_BASE_URL:-}" ]]; then
+    echo "Using preconfigured OPENAI_BASE_URL=${OPENAI_BASE_URL}"
+    return 0
+  fi
+
+  base_url="$(build_tailnet_llm_base_url "$llm_ip")"
+  export LLM_ACTION_BASE_URL="$base_url"
+  export OPENAI_BASE_URL="$base_url"
+  echo "Derived LLM_ACTION_BASE_URL=${base_url} from TAILNET_LLM_API_IP=${llm_ip}"
 }
 
 discover_tailnet_hostnames() {
@@ -156,11 +223,10 @@ prepare_app_args() {
 cleanup() {
   if [ -n "$TAILSCALED_PID" ]; then
     echo "Cleaning up Tailscale..."
-    # Give tailscale socket time to be ready
-    sleep 1
-    /usr/local/bin/tailscale logout >/dev/null 2>&1 || true
-    sleep 1
-    if [ -n "$TAILSCALED_PID" ] && kill -0 "$TAILSCALED_PID" 2>/dev/null; then
+    if wait_for_tcp_listener "$TAILSCALE_SOCKS5_HOST" "$TAILSCALE_SOCKS5_PORT" "tailscaled SOCKS5 listener" "$TAILSCALED_PID" >/dev/null 2>&1; then
+      /usr/local/bin/tailscale logout >/dev/null 2>&1 || true
+    fi
+    if process_running "$TAILSCALED_PID"; then
       kill "$TAILSCALED_PID" 2>/dev/null || true
       wait "$TAILSCALED_PID" 2>/dev/null || true
     fi
@@ -177,7 +243,7 @@ forward_signal() {
     exit_code="130"
   fi
 
-  if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+  if process_running "$APP_PID"; then
     kill "-$signal" "$APP_PID" 2>/dev/null || kill "$APP_PID" 2>/dev/null || true
     wait "$APP_PID" 2>/dev/null || true
   fi
@@ -194,18 +260,21 @@ fi
 if [ -n "$TAILSCALE_AUTHKEY" ]; then
   echo "DEBUG: Starting Tailscale with auth key file: $TAILSCALE_AUTHKEY_PATH"
   echo "Starting Tailscale in userspace networking mode..."
-  /usr/local/bin/tailscaled --tun=userspace-networking --socks5-server=localhost:1055 2>/dev/null &
+  /usr/local/bin/tailscaled --tun=userspace-networking --socks5-server="${TAILSCALE_SOCKS5_HOST}:${TAILSCALE_SOCKS5_PORT}" 2>/dev/null &
   TAILSCALED_PID=$!
   echo "DEBUG: tailscaled PID=$TAILSCALED_PID"
-  
-  # Wait for socket to be ready
-  sleep 2
-  
+
+  if ! wait_for_tcp_listener "$TAILSCALE_SOCKS5_HOST" "$TAILSCALE_SOCKS5_PORT" "tailscaled SOCKS5 listener" "$TAILSCALED_PID"; then
+    ps -p "$TAILSCALED_PID" -o pid=,stat=,command= 2>/dev/null || true
+    exit 1
+  fi
+
   # Authenticate with Tailscale
   /usr/local/bin/tailscale up --auth-key="${TAILSCALE_AUTHKEY}" --hostname=gmail-genie-cloud-run
   unset TAILSCALE_AUTHKEY
   echo "Tailscale connected"
   discover_tailnet_hostnames
+  configure_tailnet_llm_base_url
   
 else
   echo "DEBUG: No Tailscale auth key file found at $TAILSCALE_AUTHKEY_PATH"

@@ -8,7 +8,11 @@ WORKDIR /app
 COPY .python-version pyproject.toml README.md uv.lock ./
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends jq \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        jq \
+        netcat-openbsd \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 RUN uv sync --locked --no-dev

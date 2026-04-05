@@ -61,7 +61,12 @@ something.
 When Tailscale is enabled, you can also set `TAILNET_*_HOSTNAME` values such as
 `TAILNET_LLM_API_HOSTNAME=dgx`; `start.sh` resolves them from
 `tailscale status --json --peers` at runtime and exports the corresponding
-`TAILNET_*_IP` variables for the job.
+`TAILNET_*_IP` variables for the job. For the LLM endpoint specifically,
+`start.sh` also derives `LLM_ACTION_BASE_URL` automatically from
+`TAILNET_LLM_API_IP` unless you already set `LLM_ACTION_BASE_URL` or
+`OPENAI_BASE_URL`. The defaults are `http`, port `11434`, and path `/v1`, and
+you can override them with `TAILNET_LLM_API_SCHEME`, `TAILNET_LLM_API_PORT`,
+and `TAILNET_LLM_API_PATH`.
 
 Run the container locally with your existing Gmail config mounted in:
 
