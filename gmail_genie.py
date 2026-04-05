@@ -230,7 +230,7 @@ def main(rule_file_path, interval_seconds=600, **process_kwargs):
 
 
 def process(rule_file_path, query=None, content_preview_length=0):
-    mail_rules = MailRuleModel.parse_file(rule_file_path)
+    mail_rules = MailRuleModel.model_validate_json(Path(rule_file_path).read_text())
     # print(mail_rules)
 
     # Authenticate and create service
